@@ -1,5 +1,5 @@
 /**
- * build.js — Stremio static catalog (IMDb/ TMDB fallback)
+ * build.js — Stremio static catalog (IMDb/ TMDB-based)
  * GitHub Pages ONLY
  */
 
@@ -148,21 +148,18 @@ async function build() {
   }
 
   // =======================
-  // ENRICH IMDb / TMDB IDs
+  // ENRICH IDs
   // =======================
   for (const entry of showMap.values()) {
-    let imdb = entry.show.externals?.imdb;
+    let imdb = entry.show.externals?.imdb || null;
     let tmdbId = null;
 
+    // Try TMDB if IMDb missing
     if (!imdb) {
-      // fallback to TMDB
-      const tmdb = await tmdbFromImdb(null); // no imdb, skip
-      // alternative: if you have TVDB ID, you can map here
-    } else {
-      const tmdb = await tmdbFromImdb(imdb);
+      const tmdb = await tmdbFromImdb(imdb); // still null if imdb missing
       if (tmdb?.id) {
         tmdbId = tmdb.id;
-        const ext = await tmdbExternalIds(tmdb.id);
+        const ext = await tmdbExternalIds(tmdbId);
         if (ext?.imdb_id) imdb = ext.imdb_id;
       }
     }
@@ -177,12 +174,15 @@ async function build() {
   const metas = [];
 
   for (const entry of showMap.values()) {
-    // pick last 10 days
     const recent = filterLastNDays(entry.episodes, 10, todayStr);
     if (!recent.length) continue;
 
-    // --- sort episodes descending
-    recent.sort((a, b) => new Date(pickDate(b)) - new Date(pickDate(a)));
+    // --- sort episodes newest first
+    recent.sort((a, b) => {
+      const dateA = new Date(pickDate(a));
+      const dateB = new Date(pickDate(b));
+      return dateB - dateA;
+    });
 
     const videos = recent.map(ep => ({
       id: entry.imdb
@@ -197,26 +197,23 @@ async function build() {
       overview: cleanHTML(ep.summary)
     })).filter(v => v.id);
 
-    if (!videos.length) continue;
-
     metas.push({
-      id: entry.imdb || `tmdb:${entry.tmdbId}`,
+      id: entry.imdb || (entry.tmdbId ? `tmdb:${entry.tmdbId}` : null),
       type: "series",
       name: entry.show.name,
       description: cleanHTML(entry.show.summary),
       poster: entry.show.image?.original || entry.show.image?.medium || null,
       background: entry.show.image?.original || null,
-      videos
+      videos,
+      latestEpisode: new Date(videos[0]?.released || 0)
     });
   }
 
-  // --- SORT SHOWS by latest episode date
-  metas.sort((a, b) => {
-    const latestA = a.videos?.[0]?.released;
-    const latestB = b.videos?.[0]?.released;
-    return new Date(latestB) - new Date(latestA);
-  });
+  // --- sort shows by newest episode descending
+  metas.sort((a, b) => b.latestEpisode - a.latestEpisode);
+  metas.forEach(m => delete m.latestEpisode);
 
+  // --- write catalog
   fs.mkdirSync(CATALOG_DIR, { recursive: true });
   fs.writeFileSync(
     path.join(CATALOG_DIR, "tvmaze_weekly_schedule.json"),
