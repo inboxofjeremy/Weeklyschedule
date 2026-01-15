@@ -1,5 +1,5 @@
 /**
- * build.js — Stremio static catalog (IMDb/TVMaze weekly)
+ * build.js — Stremio static catalog (IMDb/TMDB-based)
  * GitHub Pages ONLY
  */
 
@@ -146,30 +146,33 @@ async function build() {
   }
 
   // =======================
-  // ENRICH IMDb OR TMDB IDs
+  // ENRICH IMDb / TMDB IDs
   // =======================
   for (const entry of showMap.values()) {
     let imdb = entry.show.externals?.imdb;
-    let tmdbId = null;
 
-    // If IMDb exists, keep it; else try TMDB
-    if (!imdb) {
-      // Try TMDB using TVMaze ID
-      const tmdbFallback = await fetchJSON(`https://api.themoviedb.org/3/tv/${entry.show.id}?api_key=${TMDB_API_KEY}`);
-      if (tmdbFallback?.id) {
-        tmdbId = tmdbFallback.id;
-      }
-    } else {
+    if (imdb) {
+      // Try TMDB to enrich
       const tmdb = await tmdbFromImdb(imdb);
       if (tmdb?.id) {
         const ext = await tmdbExternalIds(tmdb.id);
         if (ext?.imdb_id) imdb = ext.imdb_id;
-        tmdbId = tmdb.id;
+      }
+    }
+
+    // If no IMDb, fallback to TMDB ID
+    if (!imdb && entry.show.externals?.thetvdb) {
+      const tvdbId = entry.show.externals.thetvdb;
+      const tmdbFromTvdb = await fetchJSON(
+        `https://api.themoviedb.org/3/find/${tvdbId}?api_key=${TMDB_API_KEY}&external_source=tvdb_id`
+      );
+      if (tmdbFromTvdb?.tv_results?.[0]?.id) {
+        const tmdbId = tmdbFromTvdb.tv_results[0].id;
+        imdb = `tmdb:${tmdbId}`;
       }
     }
 
     entry.imdb = imdb;
-    entry.tmdbId = tmdbId;
   }
 
   // =======================
@@ -178,24 +181,24 @@ async function build() {
   const metas = [];
 
   for (const entry of showMap.values()) {
-    if (!entry.imdb && !entry.tmdbId) continue;
+    if (!entry.imdb) continue;
 
-    const recent = filterLastNDays(entry.episodes, 10, todayStr)
-      .sort((a, b) => new Date(pickDate(b)) - new Date(pickDate(a))); // episodes newest first
-
+    const recent = filterLastNDays(entry.episodes, 10, todayStr);
     if (!recent.length) continue;
 
-    const videos = recent.map(ep => ({
-      id: `${entry.imdb || `tmdb:${entry.tmdbId}`}:${ep.season}:${ep.number}`,
-      title: ep.name,
-      season: ep.season,
-      episode: ep.number,
-      released: pickDate(ep),
-      overview: cleanHTML(ep.summary)
-    }));
+    const videos = recent
+      .map(ep => ({
+        id: `${entry.imdb}:${ep.season}:${ep.number}`,
+        title: ep.name,
+        season: ep.season,
+        episode: ep.number,
+        released: pickDate(ep),
+        overview: cleanHTML(ep.summary)
+      }))
+      .sort((a, b) => new Date(b.released) - new Date(a.released)); // newest first
 
     metas.push({
-      id: entry.imdb || `tmdb:${entry.tmdbId}`,
+      id: entry.imdb,
       type: "series",
       name: entry.show.name,
       description: cleanHTML(entry.show.summary),
@@ -203,15 +206,13 @@ async function build() {
       background: entry.show.image?.original || null,
       videos
     });
-
-    console.log("Added:", entry.show.name, entry.imdb || `tmdb:${entry.tmdbId}`);
   }
 
-  // Sort shows by latest episode
+  // Sort shows by newest episode descending
   metas.sort((a, b) => {
-    const dateA = new Date(a.videos[0]?.released || 0);
-    const dateB = new Date(b.videos[0]?.released || 0);
-    return dateB - dateA;
+    const aLatest = new Date(a.videos[0]?.released || 0);
+    const bLatest = new Date(b.videos[0]?.released || 0);
+    return bLatest - aLatest;
   });
 
   fs.mkdirSync(CATALOG_DIR, { recursive: true });
