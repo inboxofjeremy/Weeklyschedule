@@ -15,9 +15,7 @@
     "series"
   ],
 
-  "idPrefixes": [
-    "tt"
-  ],
+  "idPrefixes": ["tt", "tmdb"],
 
   "catalogs": [
     {
