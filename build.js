@@ -123,7 +123,6 @@ async function build() {
         const show = ep.show || ep._embedded?.show;
         if (!show?.id) continue;
 
-        // Skip obvious blocks
         if (isNews(show) || isSports(show) || isBlockedWebChannel(show) || isYouTubeShow(show)) continue;
 
         if (!showMap.has(show.id)) {
@@ -142,25 +141,22 @@ async function build() {
 
   for (const entry of showMap.values()) {
     let imdb = entry.show.externals?.imdb;
-    let tmdbId = null;
+    let stremioId = null;
 
-    // If no IMDb, try TMDB via TMDB API lookup using external IDs
-    if (!imdb) {
-      if (entry.show.externals?.thetvdb) {
-        const tmdb = await tmdbFromTvdb(entry.show.externals.thetvdb); // optional if you implement
-        if (tmdb?.id) {
-          tmdbId = tmdb.id;
-          const ext = await tmdbExternalIds(tmdb.id);
-          if (ext?.imdb_id) imdb = ext.imdb_id;
-        }
+    if (imdb) {
+      // Use IMDb if available
+      stremioId = imdb;
+    } else {
+      // Fallback: TMDB ID via TMDB search by name
+      const tmdbSearchUrl = `https://api.themoviedb.org/3/search/tv?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(entry.show.name)}`;
+      const searchData = await fetchJSON(tmdbSearchUrl);
+      const tmdb = searchData?.results?.[0];
+      if (tmdb?.id) {
+        stremioId = `tmdb:${tmdb.id}`;
       }
     }
 
-    const stremioId = imdb || (tmdbId ? `tmdb:${tmdbId}` : null);
-    if (!stremioId) continue; // skip shows with no usable ID
-
-    // Filter foreign/blocked after enrichment (use TMDB country if available)
-    // Could implement country override if desired
+    if (!stremioId) continue;
 
     const recentEpisodes = filterLastNDays(entry.episodes, 10, todayStr);
     if (!recentEpisodes.length) continue;
