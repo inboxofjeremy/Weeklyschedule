@@ -1,5 +1,5 @@
 /**
- * build.js — Stremio static catalog (IMDb-based)
+ * build.js — Stremio static catalog (IMDb + TMDB fallback)
  * GitHub Pages ONLY
  */
 
@@ -12,6 +12,7 @@ import path from "path";
 const TMDB_API_KEY = "944017b839d3c040bdd2574083e4c1bc";
 const OUT_DIR = "./";
 const CATALOG_DIR = path.join(OUT_DIR, "catalog", "series");
+const DAYS_BACK = 10;
 
 // =======================
 // TVMAZE RATE LIMIT
@@ -60,7 +61,7 @@ function filterLastNDays(episodes, n, todayStr) {
 }
 
 // =======================
-// FILTERS (UNCHANGED)
+// CONTENT FILTERS
 // =======================
 function isSports(show) {
   return (show.type || "").toLowerCase() === "sports" ||
@@ -92,15 +93,18 @@ function isYouTubeShow(show) {
 // =======================
 // TMDB ENRICHMENT
 // =======================
-async function tmdbFromImdb(imdb) {
+async function tmdbFindByImdb(imdb) {
   const url = `https://api.themoviedb.org/3/find/${imdb}?api_key=${TMDB_API_KEY}&external_source=imdb_id`;
   const data = await fetchJSON(url);
   return data?.tv_results?.[0] || null;
 }
 
-async function tmdbExternalIds(tmdbId) {
-  const url = `https://api.themoviedb.org/3/tv/${tmdbId}/external_ids?api_key=${TMDB_API_KEY}`;
-  return await fetchJSON(url);
+async function tmdbFindByName(show) {
+  const name = encodeURIComponent(show.name);
+  const year = show.premiered?.slice(0, 4) || "";
+  const url = `https://api.themoviedb.org/3/search/tv?api_key=${TMDB_API_KEY}&query=${name}&first_air_date_year=${year}`;
+  const data = await fetchJSON(url);
+  return data?.results?.[0] || null;
 }
 
 // =======================
@@ -111,7 +115,7 @@ async function build() {
   const showMap = new Map();
 
   // --- DISCOVER SCHEDULE (last 10 days)
-  for (let i = 0; i < 10; i++) {
+  for (let i = 0; i < DAYS_BACK; i++) {
     const d = new Date(todayStr);
     d.setDate(d.getDate() - i);
     const dateStr = d.toISOString().slice(0, 10);
@@ -146,21 +150,25 @@ async function build() {
   }
 
   // =======================
-  // ENRICH IMDb IDs
+  // ENRICH IDs (IMDb → TMDB fallback)
   // =======================
   for (const entry of showMap.values()) {
     let imdb = entry.show.externals?.imdb;
+    let tmdbId = null;
 
-    // Try TMDB via IMDb
-    if (!imdb) continue;
-
-    const tmdb = await tmdbFromImdb(imdb);
-    if (tmdb?.id) {
-      const ext = await tmdbExternalIds(tmdb.id);
-      if (ext?.imdb_id) imdb = ext.imdb_id;
+    if (imdb) {
+      const tmdb = await tmdbFindByImdb(imdb);
+      if (tmdb?.id) tmdbId = tmdb.id;
+    } else {
+      const tmdb = await tmdbFindByName(entry.show);
+      if (tmdb?.id) tmdbId = tmdb.id;
     }
 
-    entry.imdb = imdb;
+    if (imdb) {
+      entry.stremioId = imdb;               // tt1234567
+    } else if (tmdbId) {
+      entry.stremioId = `tmdb:${tmdbId}`;   // tmdb:12345
+    }
   }
 
   // =======================
@@ -169,22 +177,22 @@ async function build() {
   const metas = [];
 
   for (const entry of showMap.values()) {
-    if (!entry.imdb) continue;
+    if (!entry.stremioId) continue;
 
-    const recent = filterLastNDays(entry.episodes, 10, todayStr);
+    const recent = filterLastNDays(entry.episodes, DAYS_BACK, todayStr);
     if (!recent.length) continue;
 
     const videos = recent.map(ep => ({
-      id: `${entry.imdb}:${ep.season}:${ep.number}`,
+      id: `${entry.stremioId}:${ep.season || 0}:${ep.number || ep.id}`,
       title: ep.name,
-      season: ep.season,
-      episode: ep.number,
+      season: ep.season || 0,
+      episode: ep.number || 0,
       released: pickDate(ep),
       overview: cleanHTML(ep.summary)
     }));
 
     metas.push({
-      id: entry.imdb,
+      id: entry.stremioId,
       type: "series",
       name: entry.show.name,
       description: cleanHTML(entry.show.summary),
@@ -193,7 +201,7 @@ async function build() {
       videos
     });
 
-    console.log("Added:", entry.show.name, entry.imdb);
+    console.log("Added:", entry.show.name, entry.stremioId);
   }
 
   fs.mkdirSync(CATALOG_DIR, { recursive: true });
