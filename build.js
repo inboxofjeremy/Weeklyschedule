@@ -70,6 +70,11 @@ function isSports(show) {
 
 function isNews(show) {
   const t = (show.type || "").toLowerCase();
+  // Allow panel shows
+  const isPanel = (show.genres || []).some(g =>
+    ["panel", "quiz", "game show"].includes(g?.toLowerCase())
+  );
+  if (isPanel) return false; // override news filter
   return t === "news" || t === "talk show";
 }
 
@@ -133,11 +138,11 @@ async function build() {
         if (!show?.id) continue;
 
         if (
-          isNews(show) ||
           isSports(show) ||
           isForeign(show) ||
           isBlockedWebChannel(show) ||
-          isYouTubeShow(show)
+          isYouTubeShow(show) ||
+          isNews(show) // panel shows allowed inside isNews
         ) continue;
 
         if (!showMap.has(show.id)) {
@@ -182,6 +187,9 @@ async function build() {
     const recent = filterLastNDays(entry.episodes, DAYS_BACK, todayStr);
     if (!recent.length) continue;
 
+    // Sort episodes ascending by date
+    recent.sort((a, b) => new Date(pickDate(a)) - new Date(pickDate(b)));
+
     const videos = recent.map(ep => ({
       id: `${entry.stremioId}:${ep.season || 0}:${ep.number || ep.id}`,
       title: ep.name,
@@ -203,6 +211,13 @@ async function build() {
 
     console.log("Added:", entry.show.name, entry.stremioId);
   }
+
+  // Sort shows by latest episode descending
+  metas.sort((a, b) => {
+    const dateA = a.videos[a.videos.length - 1]?.released || "1900-01-01";
+    const dateB = b.videos[b.videos.length - 1]?.released || "1900-01-01";
+    return new Date(dateB) - new Date(dateA);
+  });
 
   fs.mkdirSync(CATALOG_DIR, { recursive: true });
   fs.writeFileSync(
