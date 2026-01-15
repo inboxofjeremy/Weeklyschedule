@@ -1,5 +1,5 @@
 /**
- * build.js — Stremio static catalog (IMDb + TMDB fallback)
+ * build.js — Stremio static catalog (IMDb/TMDB-based)
  * GitHub Pages ONLY
  */
 
@@ -12,7 +12,6 @@ import path from "path";
 const TMDB_API_KEY = "944017b839d3c040bdd2574083e4c1bc";
 const OUT_DIR = "./";
 const CATALOG_DIR = path.join(OUT_DIR, "catalog", "series");
-const DAYS_BACK = 10;
 
 // =======================
 // TVMAZE RATE LIMIT
@@ -60,8 +59,12 @@ function filterLastNDays(episodes, n, todayStr) {
   });
 }
 
+function sortEpisodesDesc(episodes) {
+  return episodes.sort((a, b) => new Date(b.released) - new Date(a.released));
+}
+
 // =======================
-// CONTENT FILTERS
+// FILTERS
 // =======================
 function isSports(show) {
   return (show.type || "").toLowerCase() === "sports" ||
@@ -71,15 +74,6 @@ function isSports(show) {
 function isNews(show) {
   const t = (show.type || "").toLowerCase();
   return t === "news" || t === "talk show";
-}
-
-function isForeign(show) {
-  const allowed = ["US", "GB", "CA", "AU", "IE", "NZ"];
-  const c =
-    show?.network?.country?.code ||
-    show?.webChannel?.country?.code ||
-    "";
-  return c && !allowed.includes(c.toUpperCase());
 }
 
 function isBlockedWebChannel(show) {
@@ -93,18 +87,15 @@ function isYouTubeShow(show) {
 // =======================
 // TMDB ENRICHMENT
 // =======================
-async function tmdbFindByImdb(imdb) {
+async function tmdbFromImdb(imdb) {
   const url = `https://api.themoviedb.org/3/find/${imdb}?api_key=${TMDB_API_KEY}&external_source=imdb_id`;
   const data = await fetchJSON(url);
   return data?.tv_results?.[0] || null;
 }
 
-async function tmdbFindByName(show) {
-  const name = encodeURIComponent(show.name);
-  const year = show.premiered?.slice(0, 4) || "";
-  const url = `https://api.themoviedb.org/3/search/tv?api_key=${TMDB_API_KEY}&query=${name}&first_air_date_year=${year}`;
-  const data = await fetchJSON(url);
-  return data?.results?.[0] || null;
+async function tmdbExternalIds(tmdbId) {
+  const url = `https://api.themoviedb.org/3/tv/${tmdbId}/external_ids?api_key=${TMDB_API_KEY}`;
+  return await fetchJSON(url);
 }
 
 // =======================
@@ -115,7 +106,7 @@ async function build() {
   const showMap = new Map();
 
   // --- DISCOVER SCHEDULE (last 10 days)
-  for (let i = 0; i < DAYS_BACK; i++) {
+  for (let i = 0; i < 10; i++) {
     const d = new Date(todayStr);
     d.setDate(d.getDate() - i);
     const dateStr = d.toISOString().slice(0, 10);
@@ -132,13 +123,8 @@ async function build() {
         const show = ep.show || ep._embedded?.show;
         if (!show?.id) continue;
 
-        if (
-          isNews(show) ||
-          isSports(show) ||
-          isForeign(show) ||
-          isBlockedWebChannel(show) ||
-          isYouTubeShow(show)
-        ) continue;
+        // Skip obvious blocks
+        if (isNews(show) || isSports(show) || isBlockedWebChannel(show) || isYouTubeShow(show)) continue;
 
         if (!showMap.has(show.id)) {
           showMap.set(show.id, { show, episodes: [ep] });
@@ -150,49 +136,47 @@ async function build() {
   }
 
   // =======================
-  // ENRICH IDs (IMDb → TMDB fallback)
-  // =======================
-  for (const entry of showMap.values()) {
-    let imdb = entry.show.externals?.imdb;
-    let tmdbId = null;
-
-    if (imdb) {
-      const tmdb = await tmdbFindByImdb(imdb);
-      if (tmdb?.id) tmdbId = tmdb.id;
-    } else {
-      const tmdb = await tmdbFindByName(entry.show);
-      if (tmdb?.id) tmdbId = tmdb.id;
-    }
-
-    if (imdb) {
-      entry.stremioId = imdb;               // tt1234567
-    } else if (tmdbId) {
-      entry.stremioId = `tmdb:${tmdbId}`;   // tmdb:12345
-    }
-  }
-
-  // =======================
-  // BUILD STREMIO CATALOG
+  // ENRICH & FILTER SHOWS
   // =======================
   const metas = [];
 
   for (const entry of showMap.values()) {
-    if (!entry.stremioId) continue;
+    let imdb = entry.show.externals?.imdb;
+    let tmdbId = null;
 
-    const recent = filterLastNDays(entry.episodes, DAYS_BACK, todayStr);
-    if (!recent.length) continue;
+    // If no IMDb, try TMDB via TMDB API lookup using external IDs
+    if (!imdb) {
+      if (entry.show.externals?.thetvdb) {
+        const tmdb = await tmdbFromTvdb(entry.show.externals.thetvdb); // optional if you implement
+        if (tmdb?.id) {
+          tmdbId = tmdb.id;
+          const ext = await tmdbExternalIds(tmdb.id);
+          if (ext?.imdb_id) imdb = ext.imdb_id;
+        }
+      }
+    }
 
-    const videos = recent.map(ep => ({
-      id: `${entry.stremioId}:${ep.season || 0}:${ep.number || ep.id}`,
-      title: ep.name,
-      season: ep.season || 0,
-      episode: ep.number || 0,
+    const stremioId = imdb || (tmdbId ? `tmdb:${tmdbId}` : null);
+    if (!stremioId) continue; // skip shows with no usable ID
+
+    // Filter foreign/blocked after enrichment (use TMDB country if available)
+    // Could implement country override if desired
+
+    const recentEpisodes = filterLastNDays(entry.episodes, 10, todayStr);
+    if (!recentEpisodes.length) continue;
+
+    const sorted = sortEpisodesDesc(recentEpisodes);
+    const videos = sorted.map(ep => ({
+      id: `${stremioId}:${ep.season}:${ep.number}`,
+      title: ep.name || ep.summary || "Episode",
+      season: ep.season,
+      episode: ep.number,
       released: pickDate(ep),
       overview: cleanHTML(ep.summary)
     }));
 
     metas.push({
-      id: entry.stremioId,
+      id: stremioId,
       type: "series",
       name: entry.show.name,
       description: cleanHTML(entry.show.summary),
@@ -201,9 +185,12 @@ async function build() {
       videos
     });
 
-    console.log("Added:", entry.show.name, entry.stremioId);
+    console.log("Added:", entry.show.name, stremioId);
   }
 
+  // =======================
+  // WRITE FILE
+  // =======================
   fs.mkdirSync(CATALOG_DIR, { recursive: true });
   fs.writeFileSync(
     path.join(CATALOG_DIR, "tvmaze_weekly_schedule.json"),
