@@ -1,5 +1,5 @@
 /**
- * build.js — Stremio static catalog (IMDb/TMDB-based)
+ * build.js — Stremio static catalog (IMDb/ TMDB fallback)
  * GitHub Pages ONLY
  */
 
@@ -148,14 +148,17 @@ async function build() {
   }
 
   // =======================
-  // ENRICH IMDb/TMDB IDs
+  // ENRICH IMDb / TMDB IDs
   // =======================
   for (const entry of showMap.values()) {
     let imdb = entry.show.externals?.imdb;
     let tmdbId = null;
 
-    // Try TMDB via IMDb
     if (!imdb) {
+      // fallback to TMDB
+      const tmdb = await tmdbFromImdb(null); // no imdb, skip
+      // alternative: if you have TVDB ID, you can map here
+    } else {
       const tmdb = await tmdbFromImdb(imdb);
       if (tmdb?.id) {
         tmdbId = tmdb.id;
@@ -164,12 +167,8 @@ async function build() {
       }
     }
 
-    // Fallback: if still no IMDb, use TMDB ID
-    if (!imdb && tmdbId) {
-      entry.tmdbId = tmdbId;
-    }
-
     entry.imdb = imdb;
+    entry.tmdbId = tmdbId;
   }
 
   // =======================
@@ -178,15 +177,12 @@ async function build() {
   const metas = [];
 
   for (const entry of showMap.values()) {
+    // pick last 10 days
     const recent = filterLastNDays(entry.episodes, 10, todayStr);
     if (!recent.length) continue;
 
-    // Sort episodes descending by date
-    recent.sort((a, b) => {
-      const da = new Date(pickDate(a));
-      const db = new Date(pickDate(b));
-      return db - da;
-    });
+    // --- sort episodes descending
+    recent.sort((a, b) => new Date(pickDate(b)) - new Date(pickDate(a)));
 
     const videos = recent.map(ep => ({
       id: entry.imdb
@@ -201,6 +197,8 @@ async function build() {
       overview: cleanHTML(ep.summary)
     })).filter(v => v.id);
 
+    if (!videos.length) continue;
+
     metas.push({
       id: entry.imdb || `tmdb:${entry.tmdbId}`,
       type: "series",
@@ -210,14 +208,12 @@ async function build() {
       background: entry.show.image?.original || null,
       videos
     });
-
-    console.log("Added:", entry.show.name, entry.imdb || `tmdb:${entry.tmdbId}`);
   }
 
-  // Sort shows by **latest episode first**
+  // --- SORT SHOWS by latest episode date
   metas.sort((a, b) => {
-    const latestA = a.videos?.[0]?.released || "";
-    const latestB = b.videos?.[0]?.released || "";
+    const latestA = a.videos?.[0]?.released;
+    const latestB = b.videos?.[0]?.released;
     return new Date(latestB) - new Date(latestA);
   });
 
