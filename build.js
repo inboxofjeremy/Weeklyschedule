@@ -116,7 +116,13 @@ async function tmdbFindByName(show) {
 // MAIN BUILD
 // =======================
 async function build() {
-  const todayStr = new Date().toISOString().slice(0, 10);
+const now = new Date();
+const todayStr = new Date(
+  now.getFullYear(),
+  now.getMonth(),
+  now.getDate()
+).toISOString().slice(0, 10);
+  
   const showMap = new Map();
 
   // --- DISCOVER SCHEDULE (last 10 days)
