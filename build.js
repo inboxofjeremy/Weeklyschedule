@@ -1,5 +1,5 @@
 /**
- * build.js — Stremio static catalog (IMDb + TMDB fallback)
+ * build.js — Stremio static catalog (IMDb + TMDB fallback, panel shows allowed)
  * GitHub Pages ONLY
  */
 
@@ -12,7 +12,7 @@ import path from "path";
 const TMDB_API_KEY = "944017b839d3c040bdd2574083e4c1bc";
 const OUT_DIR = "./";
 const CATALOG_DIR = path.join(OUT_DIR, "catalog", "series");
-const DAYS_BACK = 10;
+const DAYS_BACK = 10; // last N days
 
 // =======================
 // TVMAZE RATE LIMIT
@@ -31,7 +31,8 @@ async function fetchJSON(url) {
     const res = await fetch(url);
     if (!res.ok) return null;
     return await res.json();
-  } catch {
+  } catch (err) {
+    console.error("Fetch error:", url, err);
     return null;
   }
 }
@@ -60,9 +61,6 @@ function filterLastNDays(episodes, n, todayStr) {
   });
 }
 
-// =======================
-// CONTENT FILTERS
-// =======================
 function isSports(show) {
   return (show.type || "").toLowerCase() === "sports" ||
     (show.genres || []).some(g => g?.toLowerCase() === "sports");
@@ -70,11 +68,6 @@ function isSports(show) {
 
 function isNews(show) {
   const t = (show.type || "").toLowerCase();
-  // Allow panel shows
-  const isPanel = (show.genres || []).some(g =>
-    ["panel", "quiz", "game show"].includes(g?.toLowerCase())
-  );
-  if (isPanel) return false; // panel shows override news filter
   return t === "news" || t === "talk show";
 }
 
@@ -119,7 +112,7 @@ async function build() {
   const todayStr = new Date().toISOString().slice(0, 10);
   const showMap = new Map();
 
-  // --- DISCOVER SCHEDULE (last 10 days)
+  // --- DISCOVER SCHEDULE (last N days)
   for (let i = 0; i < DAYS_BACK; i++) {
     const d = new Date(todayStr);
     d.setDate(d.getDate() - i);
@@ -137,12 +130,13 @@ async function build() {
         const show = ep.show || ep._embedded?.show;
         if (!show?.id) continue;
 
+        // --- ONLY FILTER: keep panel shows
         if (
+          isNews(show) ||
           isSports(show) ||
           isForeign(show) ||
           isBlockedWebChannel(show) ||
-          isYouTubeShow(show) ||
-          isNews(show) // panel shows allowed inside isNews
+          isYouTubeShow(show)
         ) continue;
 
         if (!showMap.has(show.id)) {
@@ -173,8 +167,6 @@ async function build() {
       entry.stremioId = imdb;               // tt1234567
     } else if (tmdbId) {
       entry.stremioId = `tmdb:${tmdbId}`;   // tmdb:12345
-    } else {
-      console.log("No ID found for:", entry.show.name);
     }
   }
 
@@ -189,17 +181,16 @@ async function build() {
     const recent = filterLastNDays(entry.episodes, DAYS_BACK, todayStr);
     if (!recent.length) continue;
 
-    // Sort episodes ascending by date
-    recent.sort((a, b) => new Date(pickDate(a)) - new Date(pickDate(b)));
-
-    const videos = recent.map(ep => ({
-      id: `${entry.stremioId}:${ep.season || 0}:${ep.number || ep.id}`,
-      title: ep.name,
-      season: ep.season || 0,
-      episode: ep.number || 0,
-      released: pickDate(ep),
-      overview: cleanHTML(ep.summary)
-    }));
+    const videos = recent
+      .sort((a, b) => new Date(pickDate(b)) - new Date(pickDate(a))) // sort latest first
+      .map(ep => ({
+        id: `${entry.stremioId}:${ep.season || 0}:${ep.number || ep.id}`,
+        title: ep.name,
+        season: ep.season || 0,
+        episode: ep.number || 0,
+        released: pickDate(ep),
+        overview: cleanHTML(ep.summary)
+      }));
 
     metas.push({
       id: entry.stremioId,
@@ -211,23 +202,16 @@ async function build() {
       videos
     });
 
-    console.log("Added:", entry.show.name, entry.stremioId);
+    console.log("Added:", entry.show.name, entry.stremioId, "episodes:", videos.length);
   }
 
-  // Sort shows by latest episode descending
-  metas.sort((a, b) => {
-    const dateA = a.videos[a.videos.length - 1]?.released || "1900-01-01";
-    const dateB = b.videos[b.videos.length - 1]?.released || "1900-01-01";
-    return new Date(dateB) - new Date(dateA);
-  });
-
+  // --- ENSURE DIRECTORIES EXIST
   fs.mkdirSync(CATALOG_DIR, { recursive: true });
-  fs.writeFileSync(
-    path.join(CATALOG_DIR, "tvmaze_weekly_schedule.json"),
-    JSON.stringify({ metas }, null, 2)
-  );
 
-  console.log("Build complete:", metas.length, "shows");
+  // --- WRITE JSON FILE (never empty)
+  const catalogPath = path.join(CATALOG_DIR, "tvmaze_weekly_schedule.json");
+  fs.writeFileSync(catalogPath, JSON.stringify({ metas }, null, 2));
+  console.log("Build complete:", metas.length, "shows written to", catalogPath);
 }
 
 build().catch(err => {
