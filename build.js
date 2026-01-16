@@ -169,24 +169,34 @@ async function build() {
   }
 
   // =======================
-  // ENRICH IDs (IMDb → TMDB fallback)
-  // =======================
-  for (const entry of showMap.values()) {
-    let imdb = entry.show.externals?.imdb;
-    let tmdbId = null;
+ // =======================
+// ENRICH IDs (IMDb → TMDB fallback)
+// =======================
+for (const entry of showMap.values()) {
+  let imdb = entry.show.externals?.imdb;
+  let tmdbId = null;
 
-    if (imdb) {
-      const tmdb = await tmdbFindByImdb(imdb);
-      if (tmdb?.id) tmdbId = tmdb.id;
+  if (imdb) {
+    const tmdb = await tmdbFindByImdb(imdb);
+    if (tmdb?.id) {
+      tmdbId = tmdb.id;
     } else {
-      const tmdb = await tmdbFindByName(entry.show);
-      if (tmdb?.id) tmdbId = tmdb.id;
+      // 🔹 fallback if IMDb lookup fails
+      const tmdbByName = await tmdbFindByName(entry.show);
+      if (tmdbByName?.id) tmdbId = tmdbByName.id;
     }
-
-    if (imdb) entry.stremioId = imdb;
-    else if (tmdbId) entry.stremioId = `tmdb:${tmdbId}`;
+  } else {
+    const tmdb = await tmdbFindByName(entry.show);
+    if (tmdb?.id) tmdbId = tmdb.id;
   }
 
+  // ✅ IMDb always preferred for Stremio ID
+  if (imdb) {
+    entry.stremioId = imdb;               // tt1234567
+  } else if (tmdbId) {
+    entry.stremioId = `tmdb:${tmdbId}`;   // tmdb:12345
+  }
+}
   // =======================
   // BUILD STREMIO CATALOG
   // =======================
