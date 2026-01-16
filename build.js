@@ -74,7 +74,7 @@ function isNews(show) {
   const isPanel = (show.genres || []).some(g =>
     ["panel", "quiz", "game show"].includes(g?.toLowerCase())
   );
-  if (isPanel) return false; // override news filter
+  if (isPanel) return false; // panel shows override news filter
   return t === "news" || t === "talk show";
 }
 
@@ -173,6 +173,8 @@ async function build() {
       entry.stremioId = imdb;               // tt1234567
     } else if (tmdbId) {
       entry.stremioId = `tmdb:${tmdbId}`;   // tmdb:12345
+    } else {
+      console.log("No ID found for:", entry.show.name);
     }
   }
 
