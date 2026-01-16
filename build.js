@@ -47,6 +47,21 @@ function pickDate(ep) {
     : ep?.airstamp?.slice(0, 10) || null;
 }
 
+// --- PACIFIC TIME YYYY-MM-DD ---
+function pacificDateString(date = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Los_Angeles",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).formatToParts(date);
+
+  const y = parts.find(p => p.type === "year").value;
+  const m = parts.find(p => p.type === "month").value;
+  const d = parts.find(p => p.type === "day").value;
+  return `${y}-${m}-${d}`;
+}
+
 function filterLastNDays(episodes, n, todayStr) {
   const today = new Date(todayStr);
   const start = new Date(todayStr);
@@ -54,7 +69,7 @@ function filterLastNDays(episodes, n, todayStr) {
 
   return episodes.filter(ep => {
     const d = pickDate(ep);
-    if (!d || d > todayStr) return false;
+    if (!d || d > todayStr) return false; // hard stop future episodes
     const dt = new Date(d);
     return dt >= start && dt <= today;
   });
@@ -70,11 +85,10 @@ function isSports(show) {
 
 function isNews(show) {
   const t = (show.type || "").toLowerCase();
-  // Allow panel shows
   const isPanel = (show.genres || []).some(g =>
     ["panel", "quiz", "game show"].includes(g?.toLowerCase())
   );
-  if (isPanel) return false; // override news filter
+  if (isPanel) return false;
   return t === "news" || t === "talk show";
 }
 
@@ -116,20 +130,14 @@ async function tmdbFindByName(show) {
 // MAIN BUILD
 // =======================
 async function build() {
-const now = new Date();
-const todayStr = new Date(
-  now.getFullYear(),
-  now.getMonth(),
-  now.getDate()
-).toISOString().slice(0, 10);
-  
+  const todayStr = pacificDateString(); // ✅ Pacific Time
   const showMap = new Map();
 
-  // --- DISCOVER SCHEDULE (last 10 days)
+  // --- DISCOVER SCHEDULE (last 10 days, PT-safe)
   for (let i = 0; i < DAYS_BACK; i++) {
-    const d = new Date(todayStr);
+    const d = new Date();
     d.setDate(d.getDate() - i);
-    const dateStr = d.toISOString().slice(0, 10);
+    const dateStr = pacificDateString(d);
 
     for (const url of [
       `https://api.tvmaze.com/schedule?country=US&date=${dateStr}`,
@@ -148,7 +156,7 @@ const todayStr = new Date(
           isForeign(show) ||
           isBlockedWebChannel(show) ||
           isYouTubeShow(show) ||
-          isNews(show) // panel shows allowed
+          isNews(show)
         ) continue;
 
         if (!showMap.has(show.id)) {
@@ -175,11 +183,8 @@ const todayStr = new Date(
       if (tmdb?.id) tmdbId = tmdb.id;
     }
 
-    if (imdb) {
-      entry.stremioId = imdb;               // tt1234567
-    } else if (tmdbId) {
-      entry.stremioId = `tmdb:${tmdbId}`;   // tmdb:12345
-    }
+    if (imdb) entry.stremioId = imdb;
+    else if (tmdbId) entry.stremioId = `tmdb:${tmdbId}`;
   }
 
   // =======================
@@ -193,17 +198,7 @@ const todayStr = new Date(
     const recent = filterLastNDays(entry.episodes, DAYS_BACK, todayStr);
     if (!recent.length) continue;
 
-    // Sort episodes ascending by date
     recent.sort((a, b) => new Date(pickDate(a)) - new Date(pickDate(b)));
-
-    const videos = recent.map(ep => ({
-      id: `${entry.stremioId}:${ep.season || 0}:${ep.number || ep.id}`,
-      title: ep.name,
-      season: ep.season || 0,
-      episode: ep.number || 0,
-      released: pickDate(ep),
-      overview: cleanHTML(ep.summary)
-    }));
 
     metas.push({
       id: entry.stremioId,
@@ -212,18 +207,22 @@ const todayStr = new Date(
       description: cleanHTML(entry.show.summary),
       poster: entry.show.image?.original || entry.show.image?.medium || null,
       background: entry.show.image?.original || null,
-      videos
+      videos: recent.map(ep => ({
+        id: `${entry.stremioId}:${ep.season || 0}:${ep.number || ep.id}`,
+        title: ep.name,
+        season: ep.season || 0,
+        episode: ep.number || 0,
+        released: pickDate(ep),
+        overview: cleanHTML(ep.summary)
+      }))
     });
-
-    console.log("Added:", entry.show.name, entry.stremioId);
   }
 
-  // Sort shows by latest episode descending
-  metas.sort((a, b) => {
-    const dateA = a.videos[a.videos.length - 1]?.released || "1900-01-01";
-    const dateB = b.videos[b.videos.length - 1]?.released || "1900-01-01";
-    return new Date(dateB) - new Date(dateA);
-  });
+  // ✅ latest episode first, today at top
+  metas.sort((a, b) =>
+    new Date(b.videos[b.videos.length - 1].released) -
+    new Date(a.videos[a.videos.length - 1].released)
+  );
 
   fs.mkdirSync(CATALOG_DIR, { recursive: true });
   fs.writeFileSync(
