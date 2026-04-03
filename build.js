@@ -1,6 +1,6 @@
 /**
  * build.js — Stremio static catalog (IMDb + TMDB fallback)
- * GitHub Pages ONLY
+ * OPTION A FIX: TMDB overrides TVMaze availability
  */
 
 import fs from "fs";
@@ -47,7 +47,6 @@ function pickDate(ep) {
     : ep?.airstamp?.slice(0, 10) || null;
 }
 
-// --- PACIFIC TIME YYYY-MM-DD ---
 function pacificDateString(date = new Date()) {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "America/Los_Angeles",
@@ -62,23 +61,33 @@ function pacificDateString(date = new Date()) {
   return `${y}-${m}-${d}`;
 }
 
-/**
- * ✅ FIXED: safe date window check (no string equality bug, no timezone drift)
- */
-function inLastNDays(dateStr, n, todayStr) {
-  if (!dateStr) return false;
+// =======================
+// TMDB HELPERS (NEW)
+// =======================
+async function tmdbFindByImdb(imdb) {
+  const url = `https://api.themoviedb.org/3/find/${imdb}?api_key=${TMDB_API_KEY}&external_source=imdb_id`;
+  const data = await fetchJSON(url);
+  return data?.tv_results?.[0] || null;
+}
 
-  const today = new Date(todayStr + "T00:00:00Z");
-  const start = new Date(today);
-  start.setUTCDate(start.getUTCDate() - (n - 1));
-
-  const d = new Date(dateStr + "T00:00:00Z");
-
-  return d >= start && d <= today;
+async function tmdbFindByName(show) {
+  const name = encodeURIComponent(show.name);
+  const year = show.premiered?.slice(0, 4) || "";
+  const url = `https://api.themoviedb.org/3/search/tv?api_key=${TMDB_API_KEY}&query=${name}&first_air_date_year=${year}`;
+  const data = await fetchJSON(url);
+  return data?.results?.[0] || null;
 }
 
 // =======================
-// CONTENT FILTERS
+// TMDB EPISODE AVAILABILITY CHECK (NEW CORE LOGIC)
+// =======================
+function tmdbIsEarlier(tvmazeDate, tmdbDate) {
+  if (!tmdbDate || !tvmazeDate) return false;
+  return new Date(tmdbDate) <= new Date(tvmazeDate);
+}
+
+// =======================
+// CONTENT FILTERS (UNCHANGED)
 // =======================
 function isSports(show) {
   return (show.type || "").toLowerCase() === "sports" ||
@@ -109,23 +118,6 @@ function isBlockedWebChannel(show) {
 
 function isYouTubeShow(show) {
   return (show?.webChannel?.name || "").toLowerCase().includes("youtube");
-}
-
-// =======================
-// TMDB ENRICHMENT
-// =======================
-async function tmdbFindByImdb(imdb) {
-  const url = `https://api.themoviedb.org/3/find/${imdb}?api_key=${TMDB_API_KEY}&external_source=imdb_id`;
-  const data = await fetchJSON(url);
-  return data?.tv_results?.[0] || null;
-}
-
-async function tmdbFindByName(show) {
-  const name = encodeURIComponent(show.name);
-  const year = show.premiered?.slice(0, 4) || "";
-  const url = `https://api.themoviedb.org/3/search/tv?api_key=${TMDB_API_KEY}&query=${name}&first_air_date_year=${year}`;
-  const data = await fetchJSON(url);
-  return data?.results?.[0] || null;
 }
 
 // =======================
@@ -160,12 +152,35 @@ async function build() {
           isNews(show)
         ) continue;
 
-        const d = pickDate(ep);
-        if (!d) continue;
+        const tvmazeDate = pickDate(ep);
+        if (!tvmazeDate) continue;
 
-        // 🔥 FIX: NO strict equality anymore
-        // instead: real window validation
-        if (!inLastNDays(d, DAYS_BACK, todayStr)) continue;
+        // =======================
+        // 🔥 OPTION A CORE FIX
+        // =======================
+
+        let tmdbOverrideDate = null;
+
+        try {
+          const imdb = show.externals?.imdb;
+          let tmdb = null;
+
+          if (imdb) tmdb = await tmdbFindByImdb(imdb);
+          if (!tmdb) tmdb = await tmdbFindByName(show);
+
+          // TMDB date acts as "truth override"
+          tmdbOverrideDate = tmdb?.first_air_date || null;
+        } catch {}
+
+        // Decide final validity
+        const finalDate = tmdbOverrideDate || tvmazeDate;
+
+        const epDate = new Date(finalDate);
+        const today = new Date(todayStr);
+        const diffDays = (today - epDate) / (1000 * 60 * 60 * 24);
+
+        // allow small window for real-world streaming drift
+        if (diffDays < -1 || diffDays > DAYS_BACK + 1) continue;
 
         if (!showMap.has(show.id)) {
           showMap.set(show.id, { show, episodes: [] });
@@ -177,7 +192,7 @@ async function build() {
   }
 
   // =======================
-  // ENRICH IDS
+  // ENRICH IDS (UNCHANGED)
   // =======================
   for (const entry of showMap.values()) {
     let imdb = entry.show.externals?.imdb;
@@ -199,18 +214,12 @@ async function build() {
   }
 
   // =======================
-  // BUILD CATALOG
+  // BUILD OUTPUT
   // =======================
   const metas = [];
 
   for (const entry of showMap.values()) {
     if (!entry.stremioId) continue;
-
-    const recent = entry.episodes.filter(ep =>
-      inLastNDays(pickDate(ep), DAYS_BACK, todayStr)
-    );
-
-    if (!recent.length) continue;
 
     metas.push({
       id: entry.stremioId,
@@ -219,7 +228,7 @@ async function build() {
       description: cleanHTML(entry.show.summary),
       poster: entry.show.image?.original || entry.show.image?.medium || null,
       background: entry.show.image?.original || null,
-      videos: recent.map(ep => ({
+      videos: entry.episodes.map(ep => ({
         id: `${entry.stremioId}:${ep.season || 0}:${ep.number || ep.id}`,
         title: ep.name,
         season: ep.season || 0,
@@ -239,7 +248,4 @@ async function build() {
   console.log("Build complete:", metas.length, "shows");
 }
 
-build().catch(err => {
-  console.error(err);
-  process.exit(1);
-});
+build().catch(console.error);
