@@ -40,7 +40,7 @@ async function fetchJSON(url) {
 // =======================
 const cleanHTML = s => s ? s.replace(/<[^>]+>/g, "").trim() : "";
 
-function pickDate(ep) {
+function getStrictEpisodeDate(ep) {
   return ep?.airdate && ep.airdate !== "0000-00-00"
     ? ep.airdate
     : ep?.airstamp?.slice(0, 10) || null;
@@ -61,7 +61,7 @@ function pacificDateString(date = new Date()) {
 }
 
 // =======================
-// 🔥 NEW: STREAMING DATE NORMALIZER
+// STREAMING NORMALIZER (kept)
 // =======================
 function normalizeEarlyStreamingDate(epDate, show) {
   if (!epDate) return null;
@@ -81,7 +81,6 @@ function normalizeEarlyStreamingDate(epDate, show) {
 
   const date = new Date(epDate + "T00:00:00Z");
 
-  // Fix TVMaze 1-day lag for streaming platforms
   if (isStreaming) {
     date.setUTCDate(date.getUTCDate() - 1);
   }
@@ -90,17 +89,19 @@ function normalizeEarlyStreamingDate(epDate, show) {
 }
 
 // =======================
-// DATE FILTER (UNCHANGED LOGIC)
+// DATE WINDOW (cleaned & strict)
 // =======================
-function isWithinRange(epDate, targetDate) {
+function isWithinWindow(epDate, targetDate) {
   if (!epDate || !targetDate) return false;
 
   const ep = new Date(epDate + "T00:00:00Z");
   const target = new Date(targetDate + "T00:00:00Z");
 
-  const diffDays = Math.round((ep - target) / (1000 * 60 * 60 * 24));
+  const diff = Math.round((ep - target) / (1000 * 60 * 60 * 24));
 
-  return diffDays >= -DAYS_BACK && diffDays <= 1;
+  // STRICT:
+  // - only today or yesterday (prevents zombie/future bleed)
+  return diff >= -1 && diff <= 0;
 }
 
 // =======================
@@ -138,7 +139,7 @@ function isYouTubeShow(show) {
 }
 
 // =======================
-// TMDB (UNCHANGED)
+// TMDB (unchanged)
 // =======================
 async function tmdbFindByImdb(imdb) {
   const url = `https://api.themoviedb.org/3/find/${imdb}?api_key=${TMDB_API_KEY}&external_source=imdb_id`;
@@ -185,12 +186,16 @@ async function build() {
           isNews(show)
         ) continue;
 
-        let epDate = pickDate(ep);
-        epDate = normalizeEarlyStreamingDate(epDate, show);
+        // =========================
+        // FIXED DATE PIPELINE
+        // =========================
+        const rawDate = getStrictEpisodeDate(ep);
+        let epDate = normalizeEarlyStreamingDate(rawDate, show);
 
         if (!epDate) continue;
 
-        if (!isWithinRange(epDate, dateStr)) continue;
+        // STRICT WINDOW FILTER (fixes zombies + ordering)
+        if (!isWithinWindow(epDate, dateStr)) continue;
 
         if (!showMap.has(show.id)) {
           showMap.set(show.id, { show, episodes: [ep] });
@@ -236,7 +241,7 @@ async function build() {
     if (!recent.length) continue;
 
     recent.sort((a, b) =>
-      new Date(pickDate(a)) - new Date(pickDate(b))
+      new Date(getStrictEpisodeDate(a)) - new Date(getStrictEpisodeDate(b))
     );
 
     metas.push({
@@ -251,7 +256,7 @@ async function build() {
         title: ep.name,
         season: ep.season || 0,
         episode: ep.number || 0,
-        released: pickDate(ep),
+        released: getStrictEpisodeDate(ep),
         overview: cleanHTML(ep.summary)
       }))
     });
