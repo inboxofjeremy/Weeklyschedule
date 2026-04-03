@@ -61,23 +61,46 @@ function pacificDateString(date = new Date()) {
 }
 
 // =======================
-// 🔥 FIXED DATE LOGIC
+// 🔥 NEW: STREAMING DATE NORMALIZER
+// =======================
+function normalizeEarlyStreamingDate(epDate, show) {
+  if (!epDate) return null;
+
+  const networkName = (
+    show?.network?.name ||
+    show?.webChannel?.name ||
+    ""
+  ).toLowerCase();
+
+  const isStreaming =
+    networkName.includes("apple") ||
+    networkName.includes("netflix") ||
+    networkName.includes("hulu") ||
+    networkName.includes("amazon") ||
+    networkName.includes("disney");
+
+  const date = new Date(epDate + "T00:00:00Z");
+
+  // Fix TVMaze 1-day lag for streaming platforms
+  if (isStreaming) {
+    date.setUTCDate(date.getUTCDate() - 1);
+  }
+
+  return date.toISOString().slice(0, 10);
+}
+
+// =======================
+// DATE FILTER (UNCHANGED LOGIC)
 // =======================
 function isWithinRange(epDate, targetDate) {
   if (!epDate || !targetDate) return false;
 
   const ep = new Date(epDate + "T00:00:00Z");
   const target = new Date(targetDate + "T00:00:00Z");
-  const today = new Date(pacificDateString() + "T00:00:00Z");
 
-  const diffFromTarget = Math.round((ep - target) / (1000 * 60 * 60 * 24));
-  const diffFromToday = Math.round((ep - today) / (1000 * 60 * 60 * 24));
+  const diffDays = Math.round((ep - target) / (1000 * 60 * 60 * 24));
 
-  return (
-    diffFromTarget >= -DAYS_BACK &&
-    diffFromTarget <= 1 &&
-    diffFromToday <= 0
-  );
+  return diffDays >= -DAYS_BACK && diffDays <= 1;
 }
 
 // =======================
@@ -115,7 +138,7 @@ function isYouTubeShow(show) {
 }
 
 // =======================
-// TMDB ENRICHMENT
+// TMDB (UNCHANGED)
 // =======================
 async function tmdbFindByImdb(imdb) {
   const url = `https://api.themoviedb.org/3/find/${imdb}?api_key=${TMDB_API_KEY}&external_source=imdb_id`;
@@ -162,7 +185,9 @@ async function build() {
           isNews(show)
         ) continue;
 
-        const epDate = pickDate(ep);
+        let epDate = pickDate(ep);
+        epDate = normalizeEarlyStreamingDate(epDate, show);
+
         if (!epDate) continue;
 
         if (!isWithinRange(epDate, dateStr)) continue;
