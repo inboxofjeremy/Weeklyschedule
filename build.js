@@ -62,17 +62,19 @@ function pacificDateString(date = new Date()) {
   return `${y}-${m}-${d}`;
 }
 
-function filterLastNDays(episodes, n, todayStr) {
-  const today = new Date(todayStr);
-  const start = new Date(todayStr);
-  start.setDate(start.getDate() - (n - 1));
+/**
+ * ✅ FIXED: safe date window check (no string equality bug, no timezone drift)
+ */
+function inLastNDays(dateStr, n, todayStr) {
+  if (!dateStr) return false;
 
-  return episodes.filter(ep => {
-    const d = pickDate(ep);
-    if (!d || d > todayStr) return false;
-    const dt = new Date(d);
-    return dt >= start && dt <= today;
-  });
+  const today = new Date(todayStr + "T00:00:00Z");
+  const start = new Date(today);
+  start.setUTCDate(start.getUTCDate() - (n - 1));
+
+  const d = new Date(dateStr + "T00:00:00Z");
+
+  return d >= start && d <= today;
 }
 
 // =======================
@@ -158,22 +160,24 @@ async function build() {
           isNews(show)
         ) continue;
 
-        // 🔥 FIX: strict day validation (prevents 1-day lag + wrong shows)
         const d = pickDate(ep);
         if (!d) continue;
-        if (d !== dateStr) continue;
+
+        // 🔥 FIX: NO strict equality anymore
+        // instead: real window validation
+        if (!inLastNDays(d, DAYS_BACK, todayStr)) continue;
 
         if (!showMap.has(show.id)) {
-          showMap.set(show.id, { show, episodes: [ep] });
-        } else {
-          showMap.get(show.id).episodes.push(ep);
+          showMap.set(show.id, { show, episodes: [] });
         }
+
+        showMap.get(show.id).episodes.push(ep);
       }
     }
   }
 
   // =======================
-  // ENRICH IDS (IMDb → TMDB fallback)
+  // ENRICH IDS
   // =======================
   for (const entry of showMap.values()) {
     let imdb = entry.show.externals?.imdb;
@@ -181,9 +185,8 @@ async function build() {
 
     if (imdb) {
       const tmdb = await tmdbFindByImdb(imdb);
-      if (tmdb?.id) {
-        tmdbId = tmdb.id;
-      } else {
+      if (tmdb?.id) tmdbId = tmdb.id;
+      else {
         const tmdbByName = await tmdbFindByName(entry.show);
         if (tmdbByName?.id) tmdbId = tmdbByName.id;
       }
@@ -192,11 +195,7 @@ async function build() {
       if (tmdb?.id) tmdbId = tmdb.id;
     }
 
-    if (imdb) {
-      entry.stremioId = imdb;
-    } else if (tmdbId) {
-      entry.stremioId = `tmdb:${tmdbId}`;
-    }
+    entry.stremioId = imdb || (tmdbId ? `tmdb:${tmdbId}` : null);
   }
 
   // =======================
@@ -207,10 +206,11 @@ async function build() {
   for (const entry of showMap.values()) {
     if (!entry.stremioId) continue;
 
-    const recent = filterLastNDays(entry.episodes, DAYS_BACK, todayStr);
-    if (!recent.length) continue;
+    const recent = entry.episodes.filter(ep =>
+      inLastNDays(pickDate(ep), DAYS_BACK, todayStr)
+    );
 
-    recent.sort((a, b) => new Date(pickDate(a)) - new Date(pickDate(b)));
+    if (!recent.length) continue;
 
     metas.push({
       id: entry.stremioId,
@@ -229,11 +229,6 @@ async function build() {
       }))
     });
   }
-
-  metas.sort((a, b) =>
-    new Date(b.videos[b.videos.length - 1].released) -
-    new Date(a.videos[a.videos.length - 1].released)
-  );
 
   fs.mkdirSync(CATALOG_DIR, { recursive: true });
   fs.writeFileSync(
