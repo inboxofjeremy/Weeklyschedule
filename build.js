@@ -46,7 +46,6 @@ function pickDate(ep) {
     : ep?.airstamp?.slice(0, 10) || null;
 }
 
-// --- PACIFIC TIME YYYY-MM-DD ---
 function pacificDateString(date = new Date()) {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "America/Los_Angeles",
@@ -62,22 +61,27 @@ function pacificDateString(date = new Date()) {
 }
 
 // =======================
-// 🔥 FIXED DATE FILTER (CORE PATCH)
+// 🔥 FIXED DATE LOGIC
 // =======================
 function isWithinRange(epDate, targetDate) {
   if (!epDate || !targetDate) return false;
 
   const ep = new Date(epDate + "T00:00:00Z");
   const target = new Date(targetDate + "T00:00:00Z");
+  const today = new Date(pacificDateString() + "T00:00:00Z");
 
-  const diffDays = Math.round((ep - target) / (1000 * 60 * 60 * 24));
+  const diffFromTarget = Math.round((ep - target) / (1000 * 60 * 60 * 24));
+  const diffFromToday = Math.round((ep - today) / (1000 * 60 * 60 * 24));
 
-  // allow small drift without breaking schedule
-  return diffDays >= -1 && diffDays <= DAYS_BACK;
+  return (
+    diffFromTarget >= -DAYS_BACK &&
+    diffFromTarget <= 1 &&
+    diffFromToday <= 0
+  );
 }
 
 // =======================
-// CONTENT FILTERS (UNCHANGED)
+// CONTENT FILTERS
 // =======================
 function isSports(show) {
   return (show.type || "").toLowerCase() === "sports" ||
@@ -111,7 +115,7 @@ function isYouTubeShow(show) {
 }
 
 // =======================
-// TMDB ENRICHMENT (UNCHANGED)
+// TMDB ENRICHMENT
 // =======================
 async function tmdbFindByImdb(imdb) {
   const url = `https://api.themoviedb.org/3/find/${imdb}?api_key=${TMDB_API_KEY}&external_source=imdb_id`;
@@ -131,7 +135,6 @@ async function tmdbFindByName(show) {
 // MAIN BUILD
 // =======================
 async function build() {
-  const todayStr = pacificDateString();
   const showMap = new Map();
 
   for (let i = 0; i < DAYS_BACK; i++) {
@@ -162,9 +165,6 @@ async function build() {
         const epDate = pickDate(ep);
         if (!epDate) continue;
 
-        // ==========================
-        // ✅ FIXED LOGIC (ONLY CHANGE)
-        // ==========================
         if (!isWithinRange(epDate, dateStr)) continue;
 
         if (!showMap.has(show.id)) {
@@ -177,7 +177,7 @@ async function build() {
   }
 
   // =======================
-  // ENRICH IDS (UNCHANGED)
+  // ENRICH IDS
   // =======================
   for (const entry of showMap.values()) {
     let imdb = entry.show.externals?.imdb;
@@ -200,7 +200,7 @@ async function build() {
   }
 
   // =======================
-  // BUILD OUTPUT (UNCHANGED)
+  // OUTPUT
   // =======================
   const metas = [];
 
@@ -208,7 +208,6 @@ async function build() {
     if (!entry.stremioId) continue;
 
     const recent = entry.episodes;
-
     if (!recent.length) continue;
 
     recent.sort((a, b) =>
