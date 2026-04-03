@@ -42,7 +42,7 @@ async function fetchJSON(url) {
 const cleanHTML = s => s ? s.replace(/<[^>]+>/g, "").trim() : "";
 
 function pickDate(ep) {
-  return ep?.airdate && ep.airdate !== "0000-00-00"
+  return ep?.airdate && ep.airdate !== "0000-0000-00"
     ? ep.airdate
     : ep?.airstamp?.slice(0, 10) || null;
 }
@@ -69,7 +69,7 @@ function filterLastNDays(episodes, n, todayStr) {
 
   return episodes.filter(ep => {
     const d = pickDate(ep);
-    if (!d || d > todayStr) return false; // hard stop future episodes
+    if (!d || d > todayStr) return false;
     const dt = new Date(d);
     return dt >= start && dt <= today;
   });
@@ -130,10 +130,9 @@ async function tmdbFindByName(show) {
 // MAIN BUILD
 // =======================
 async function build() {
-  const todayStr = pacificDateString(); // ✅ Pacific Time
+  const todayStr = pacificDateString();
   const showMap = new Map();
 
-  // --- DISCOVER SCHEDULE (last 10 days, PT-safe)
   for (let i = 0; i < DAYS_BACK; i++) {
     const d = new Date();
     d.setDate(d.getDate() - i);
@@ -159,6 +158,11 @@ async function build() {
           isNews(show)
         ) continue;
 
+        // 🔥 FIX: strict day validation (prevents 1-day lag + wrong shows)
+        const d = pickDate(ep);
+        if (!d) continue;
+        if (d !== dateStr) continue;
+
         if (!showMap.has(show.id)) {
           showMap.set(show.id, { show, episodes: [ep] });
         } else {
@@ -169,36 +173,34 @@ async function build() {
   }
 
   // =======================
- // =======================
-// ENRICH IDs (IMDb → TMDB fallback)
-// =======================
-for (const entry of showMap.values()) {
-  let imdb = entry.show.externals?.imdb;
-  let tmdbId = null;
-
-  if (imdb) {
-    const tmdb = await tmdbFindByImdb(imdb);
-    if (tmdb?.id) {
-      tmdbId = tmdb.id;
-    } else {
-      // 🔹 fallback if IMDb lookup fails
-      const tmdbByName = await tmdbFindByName(entry.show);
-      if (tmdbByName?.id) tmdbId = tmdbByName.id;
-    }
-  } else {
-    const tmdb = await tmdbFindByName(entry.show);
-    if (tmdb?.id) tmdbId = tmdb.id;
-  }
-
-  // ✅ IMDb always preferred for Stremio ID
-  if (imdb) {
-    entry.stremioId = imdb;               // tt1234567
-  } else if (tmdbId) {
-    entry.stremioId = `tmdb:${tmdbId}`;   // tmdb:12345
-  }
-}
+  // ENRICH IDS (IMDb → TMDB fallback)
   // =======================
-  // BUILD STREMIO CATALOG
+  for (const entry of showMap.values()) {
+    let imdb = entry.show.externals?.imdb;
+    let tmdbId = null;
+
+    if (imdb) {
+      const tmdb = await tmdbFindByImdb(imdb);
+      if (tmdb?.id) {
+        tmdbId = tmdb.id;
+      } else {
+        const tmdbByName = await tmdbFindByName(entry.show);
+        if (tmdbByName?.id) tmdbId = tmdbByName.id;
+      }
+    } else {
+      const tmdb = await tmdbFindByName(entry.show);
+      if (tmdb?.id) tmdbId = tmdb.id;
+    }
+
+    if (imdb) {
+      entry.stremioId = imdb;
+    } else if (tmdbId) {
+      entry.stremioId = `tmdb:${tmdbId}`;
+    }
+  }
+
+  // =======================
+  // BUILD CATALOG
   // =======================
   const metas = [];
 
@@ -228,7 +230,6 @@ for (const entry of showMap.values()) {
     });
   }
 
-  // ✅ latest episode first, today at top
   metas.sort((a, b) =>
     new Date(b.videos[b.videos.length - 1].released) -
     new Date(a.videos[a.videos.length - 1].released)
