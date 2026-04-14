@@ -61,7 +61,7 @@ function pacificDateString(date = new Date()) {
 }
 
 // =======================
-// STREAMING NORMALIZER (kept)
+// STREAMING NORMALIZER
 // =======================
 function normalizeEarlyStreamingDate(epDate, show) {
   if (!epDate) return null;
@@ -89,19 +89,12 @@ function normalizeEarlyStreamingDate(epDate, show) {
 }
 
 // =======================
-// DATE WINDOW (cleaned & strict)
+// DATE WINDOW
 // =======================
 function isWithinWindow(epDate, targetDate) {
   if (!epDate || !targetDate) return false;
 
-  const ep = new Date(epDate + "T00:00:00Z");
-  const target = new Date(targetDate + "T00:00:00Z");
-
-  const diff = Math.round((ep - target) / (1000 * 60 * 60 * 24));
-
-  // STRICT:
-  // - only today or yesterday (prevents zombie/future bleed)
-  return diff >= -1 && diff <= 0;
+  return epDate === targetDate;
 }
 
 // =======================
@@ -138,8 +131,15 @@ function isYouTubeShow(show) {
   return (show?.webChannel?.name || "").toLowerCase().includes("youtube");
 }
 
+// ✅ NEW LANGUAGE FILTER
+function isBlockedLanguage(show) {
+  const blocked = ["italian", "turkish", "indonesian", "spanish", "thai"];
+  const lang = (show?.language || "").toLowerCase();
+  return blocked.includes(lang);
+}
+
 // =======================
-// TMDB (unchanged)
+// TMDB
 // =======================
 async function tmdbFindByImdb(imdb) {
   const url = `https://api.themoviedb.org/3/find/${imdb}?api_key=${TMDB_API_KEY}&external_source=imdb_id`;
@@ -181,20 +181,16 @@ async function build() {
         if (
           isSports(show) ||
           isForeign(show) ||
+          isBlockedLanguage(show) || // ✅ ADDED HERE
           isBlockedWebChannel(show) ||
           isYouTubeShow(show) ||
           isNews(show)
         ) continue;
 
-        // =========================
-        // FIXED DATE PIPELINE
-        // =========================
         const rawDate = getStrictEpisodeDate(ep);
         let epDate = normalizeEarlyStreamingDate(rawDate, show);
 
         if (!epDate) continue;
-
-        // STRICT WINDOW FILTER (fixes zombies + ordering)
         if (!isWithinWindow(epDate, dateStr)) continue;
 
         if (!showMap.has(show.id)) {
