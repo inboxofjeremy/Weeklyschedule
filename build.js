@@ -133,7 +133,17 @@ function isYouTubeShow(show) {
 
 // ✅ NEW LANGUAGE FILTER
 function isBlockedLanguage(show) {
-  const blocked = ["italian", "turkish", "indonesian", "spanish", "thai"];
+  const blocked = [
+    "italian",
+    "turkish",
+    "indonesian",
+    "spanish",
+    "thai",
+    "arabic",
+    "norwegian",
+    "german",
+    "chinese"
+  ];
   const lang = (show?.language || "").toLowerCase();
   return blocked.includes(lang);
 }
