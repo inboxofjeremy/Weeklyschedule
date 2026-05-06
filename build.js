@@ -131,9 +131,13 @@ function isYouTubeShow(show) {
   return (show?.webChannel?.name || "").toLowerCase().includes("youtube");
 }
 function isDocumentary(show) {
-  return (show.genres || []).some(g =>
+  const type = (show.type || "").toLowerCase();
+
+  const hasGenre = (show.genres || []).some(g =>
     g?.toLowerCase() === "documentary"
   );
+
+  return type === "documentary" || hasGenre;
 }
 
 // ✅ NEW LANGUAGE FILTER
