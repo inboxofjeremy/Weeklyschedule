@@ -161,9 +161,16 @@ function isBlockedLanguage(show) {
     "arabic",
     "norwegian",
     "german",
-    "chinese"
+    "chinese",
+    "korean",
+    "french",
+    "hindi"
   ];
-  const lang = (show?.language || "").toLowerCase();
+
+  const lang = String(show?.language || "")
+    .trim()
+    .toLowerCase();
+
   return blocked.includes(lang);
 }
 
