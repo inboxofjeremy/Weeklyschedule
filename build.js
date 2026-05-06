@@ -139,6 +139,16 @@ function isDocumentary(show) {
 
   return type === "documentary" || hasGenre;
 }
+function isBlockedPlatform(show) {
+  const name = (show?.webChannel?.name || "").toLowerCase();
+  return name === "tubi";
+}
+
+function isLegal(show) {
+  return (show.genres || []).some(g =>
+    g?.toLowerCase() === "legal"
+  );
+}
 
 // ✅ NEW LANGUAGE FILTER
 function isBlockedLanguage(show) {
@@ -204,6 +214,8 @@ async function build() {
           isDocumentary(show) ||
           isBlockedWebChannel(show) ||
           isYouTubeShow(show) ||
+          isLegal(show) ||            // ✅ Legal filter
+          isBlockedPlatform(show) || 
           isNews(show)
         ) continue;
 
