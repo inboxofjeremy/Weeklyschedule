@@ -130,6 +130,11 @@ function isBlockedWebChannel(show) {
 function isYouTubeShow(show) {
   return (show?.webChannel?.name || "").toLowerCase().includes("youtube");
 }
+function isDocumentary(show) {
+  return (show.genres || []).some(g =>
+    g?.toLowerCase() === "documentary"
+  );
+}
 
 // ✅ NEW LANGUAGE FILTER
 function isBlockedLanguage(show) {
@@ -192,6 +197,7 @@ async function build() {
           isSports(show) ||
           isForeign(show) ||
           isBlockedLanguage(show) || // ✅ ADDED HERE
+          isDocumentary(show) ||
           isBlockedWebChannel(show) ||
           isYouTubeShow(show) ||
           isNews(show)
