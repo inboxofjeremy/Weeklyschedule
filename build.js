@@ -173,7 +173,7 @@ function isBlockedLanguage(show) {
 }
 
 // =======================
-// TMDB (unchanged)
+// TMDB
 // =======================
 async function tmdbFindByImdb(imdb) {
   const url = `https://api.themoviedb.org/3/find/${imdb}?api_key=${TMDB_API_KEY}&external_source=imdb_id`;
@@ -240,56 +240,38 @@ async function build() {
   }
 
   // =======================
-  // ENRICH IDS (FIXED MATCHING ONLY)
+  // ENRICH IDS (MINIMAL FIX ONLY)
   // =======================
   for (const entry of showMap.values()) {
-    let imdb = entry.show.externals?.imdb;
+    const show = entry.show;
+
+    // 🔥 SAFE IMDb extraction from TVMaze variants
+    const imdb =
+      show?.externals?.imdb ||
+      show?.externals?.imdb_id ||
+      null;
+
     let tmdbId = null;
 
-    const name = encodeURIComponent(entry.show.name);
-    const year = entry.show.premiered?.slice(0, 4);
-
+    const name = encodeURIComponent(show.name);
     const url = `https://api.themoviedb.org/3/search/tv?api_key=${TMDB_API_KEY}&query=${name}`;
     const data = await fetchJSON(url);
 
     if (data?.results?.length) {
-      let best = null;
-
-      for (const r of data.results) {
-        const rYear = r.first_air_date?.slice(0, 4);
-
-        let score = 0;
-
-        // strong signal: exact name match
-        if (r.name?.toLowerCase() === entry.show.name.toLowerCase()) {
-          score += 50;
-        }
-
-        // medium signal: year match
-        if (year && rYear === year) {
-          score += 30;
-        }
-
-        // weak signal: popularity
-        score += (r.popularity || 0) * 0.01;
-
-        if (!best || score > best._score) {
-          best = { ...r, _score: score };
-        }
-      }
-
-      tmdbId = best?.id || null;
+      tmdbId = data.results[0]?.id || null;
     }
 
+    // optional verification only
     if (tmdbId && imdb) {
       const url2 = `https://api.themoviedb.org/3/tv/${tmdbId}/external_ids?api_key=${TMDB_API_KEY}`;
       const ext = await fetchJSON(url2);
 
-      if (ext?.imdb_id && ext.imdb_id !== imdb) {
-        console.warn(`IMDb mismatch ignored: ${entry.show.name}`);
+      if (ext?.imdb_id && ext?.imdb_id !== imdb) {
+        console.warn(`IMDb mismatch ignored: ${show.name}`);
       }
     }
 
+    // 🔥 GUARANTEED ID OUTPUT (NO DROPS)
     if (imdb) {
       entry.stremioId = imdb;
     } else if (tmdbId) {
