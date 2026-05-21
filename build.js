@@ -93,7 +93,6 @@ function normalizeEarlyStreamingDate(epDate, show) {
 // =======================
 function isWithinWindow(epDate, targetDate) {
   if (!epDate || !targetDate) return false;
-
   return epDate === targetDate;
 }
 
@@ -130,15 +129,15 @@ function isBlockedWebChannel(show) {
 function isYouTubeShow(show) {
   return (show?.webChannel?.name || "").toLowerCase().includes("youtube");
 }
+
 function isDocumentary(show) {
   const type = (show.type || "").toLowerCase();
-
   const hasGenre = (show.genres || []).some(g =>
     g?.toLowerCase() === "documentary"
   );
-
   return type === "documentary" || hasGenre;
 }
+
 function isBlockedPlatform(show) {
   const name = (show?.webChannel?.name || "").toLowerCase();
   return name === "tubi";
@@ -150,7 +149,6 @@ function isLegal(show) {
   );
 }
 
-// ✅ NEW LANGUAGE FILTER
 function isBlockedLanguage(show) {
   const blocked = [
     "italian",
@@ -175,7 +173,7 @@ function isBlockedLanguage(show) {
 }
 
 // =======================
-// TMDB
+// TMDB (unchanged)
 // =======================
 async function tmdbFindByImdb(imdb) {
   const url = `https://api.themoviedb.org/3/find/${imdb}?api_key=${TMDB_API_KEY}&external_source=imdb_id`;
@@ -217,12 +215,12 @@ async function build() {
         if (
           isSports(show) ||
           isForeign(show) ||
-          isBlockedLanguage(show) || // ✅ ADDED HERE
+          isBlockedLanguage(show) ||
           isDocumentary(show) ||
           isBlockedWebChannel(show) ||
           isYouTubeShow(show) ||
-          isLegal(show) ||            // ✅ Legal filter
-          isBlockedPlatform(show) || 
+          isLegal(show) ||
+          isBlockedPlatform(show) ||
           isNews(show)
         ) continue;
 
@@ -242,26 +240,46 @@ async function build() {
   }
 
   // =======================
-  // ENRICH IDS
+  // ENRICH IDS (FIXED ONLY PART)
   // =======================
   for (const entry of showMap.values()) {
     let imdb = entry.show.externals?.imdb;
     let tmdbId = null;
 
-    if (imdb) {
-      const tmdb = await tmdbFindByImdb(imdb);
-      if (tmdb?.id) tmdbId = tmdb.id;
-      else {
-        const tmdbByName = await tmdbFindByName(entry.show);
-        if (tmdbByName?.id) tmdbId = tmdbByName.id;
+    const name = encodeURIComponent(entry.show.name);
+    const year = entry.show.premiered?.slice(0, 4);
+
+    const url = `https://api.themoviedb.org/3/search/tv?api_key=${TMDB_API_KEY}&query=${name}`;
+    const data = await fetchJSON(url);
+
+    if (data?.results?.length) {
+      let best = data.results[0];
+
+      for (const r of data.results) {
+        const rYear = r.first_air_date?.slice(0, 4);
+        if (year && rYear === year) {
+          best = r;
+          break;
+        }
       }
-    } else {
-      const tmdb = await tmdbFindByName(entry.show);
-      if (tmdb?.id) tmdbId = tmdb.id;
+
+      tmdbId = best.id;
     }
 
-    if (imdb) entry.stremioId = imdb;
-    else if (tmdbId) entry.stremioId = `tmdb:${tmdbId}`;
+    if (tmdbId && imdb) {
+      const url2 = `https://api.themoviedb.org/3/tv/${tmdbId}/external_ids?api_key=${TMDB_API_KEY}`;
+      const ext = await fetchJSON(url2);
+
+      if (ext?.imdb_id && ext.imdb_id !== imdb) {
+        console.warn(`IMDb mismatch ignored: ${entry.show.name}`);
+      }
+    }
+
+    if (imdb) {
+      entry.stremioId = imdb;
+    } else if (tmdbId) {
+      entry.stremioId = `tmdb:${tmdbId}`;
+    }
   }
 
   // =======================
