@@ -240,7 +240,7 @@ async function build() {
   }
 
   // =======================
-  // ENRICH IDS (FIXED ONLY PART)
+  // ENRICH IDS (FIXED MATCHING ONLY)
   // =======================
   for (const entry of showMap.values()) {
     let imdb = entry.show.externals?.imdb;
@@ -253,17 +253,32 @@ async function build() {
     const data = await fetchJSON(url);
 
     if (data?.results?.length) {
-      let best = data.results[0];
+      let best = null;
 
       for (const r of data.results) {
         const rYear = r.first_air_date?.slice(0, 4);
+
+        let score = 0;
+
+        // strong signal: exact name match
+        if (r.name?.toLowerCase() === entry.show.name.toLowerCase()) {
+          score += 50;
+        }
+
+        // medium signal: year match
         if (year && rYear === year) {
-          best = r;
-          break;
+          score += 30;
+        }
+
+        // weak signal: popularity
+        score += (r.popularity || 0) * 0.01;
+
+        if (!best || score > best._score) {
+          best = { ...r, _score: score };
         }
       }
 
-      tmdbId = best.id;
+      tmdbId = best?.id || null;
     }
 
     if (tmdbId && imdb) {
