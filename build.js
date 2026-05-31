@@ -302,19 +302,13 @@ async function build() {
 
         if (!epDate) continue;
 
-        if (
-          !isWithinWindow(epDate, dateStr)
-        ) {
-          continue;
-        }
+        if (!isWithinWindow(epDate, dateStr)) continue;
 
         if (!showMap.has(show.id)) {
           showMap.set(show.id, {
             show,
-            episodes: [ep]
+            episodes: []
           });
-        } else {
-          showMap.get(show.id).episodes.push(ep);
         }
       }
     }
@@ -346,7 +340,7 @@ async function build() {
   }
 
   // =======================
-  // 🔧 FIX (CORRECTED MERGE - ONLY CHANGE)
+  // 🔧 FIX: FULL EPISODE SOURCE OF TRUTH
   // =======================
   for (const entry of showMap.values()) {
 
@@ -354,26 +348,11 @@ async function build() {
       `https://api.tvmaze.com/shows/${entry.show.id}/episodes`
     );
 
-    const map = new Map();
+    if (!Array.isArray(full)) continue;
 
-    // 1. schedule episodes FIRST (authoritative)
-    for (const ep of entry.episodes) {
-      const key = `${ep.season || 0}-${ep.number || 0}`;
-      map.set(key, ep);
-    }
-
-    // 2. ONLY fill missing from full endpoint (no override)
-    if (Array.isArray(full)) {
-      for (const ep of full) {
-        const key = `${ep.season || 0}-${ep.number || 0}`;
-
-        if (!map.has(key)) {
-          map.set(key, ep);
-        }
-      }
-    }
-
-    entry.episodes = Array.from(map.values());
+    // IMPORTANT FIX:
+    // schedule is NO LONGER used for episode list at all
+    entry.episodes = full;
   }
 
   // =======================
