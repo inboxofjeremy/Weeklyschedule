@@ -21,7 +21,7 @@ const TVMAZE_DELAY_MS = 150;
 let lastTvmazeCall = 0;
 
 // =======================
-// TMDB CACHE (FIX)
+// CACHE
 // =======================
 const tmdbCache = new Map();
 const tmdbEpisodeCache = new Map();
@@ -47,7 +47,6 @@ async function fetchJSON(url) {
     const res = await fetch(url);
     if (!res.ok) return null;
     return await res.json();
-
   } catch {
     return null;
   }
@@ -81,7 +80,7 @@ function pacificDateString(date = new Date()) {
 }
 
 // =======================
-// STREAMING NORMALIZER
+// NORMALIZE (kept as-is)
 // =======================
 function normalizeEarlyStreamingDate(epDate, show) {
   if (!epDate) return null;
@@ -106,10 +105,6 @@ function normalizeEarlyStreamingDate(epDate, show) {
   }
 
   return date.toISOString().slice(0, 10);
-}
-
-function isWithinWindow(epDate, targetDate) {
-  return epDate && targetDate && epDate === targetDate;
 }
 
 // =======================
@@ -174,7 +169,7 @@ function isBlockedLanguage(show) {
 }
 
 // =======================
-// TMDB (FIXED: CACHED)
+// TMDB (unchanged logic, cached)
 // =======================
 async function getTmdbIdForShow(show) {
   if (tmdbCache.has(show.id)) {
@@ -224,9 +219,10 @@ async function tmdbEpisodeOverview(tmdbId, season, episode) {
 // =======================
 async function build() {
   const showMap = new Map();
+  const qualifiedShows = new Set();
 
   // =======================
-  // TVMAZE ONLY (FIXED STRUCTURE)
+  // TVMAZE COLLECTION (FIXED)
   // =======================
   for (let i = 0; i < DAYS_BACK; i++) {
     const d = new Date();
@@ -259,11 +255,13 @@ async function build() {
         ) continue;
 
         const rawDate = getStrictEpisodeDate(ep);
+        if (!rawDate) continue;
+
         const epDate = normalizeEarlyStreamingDate(rawDate, show);
 
-        if (!isWithinWindow(epDate, dateStr)) continue;
+        // FIX: only use this to qualify shows, NOT filter episodes
+        qualifiedShows.add(show.id);
 
-        // FIX: freeze TVMaze episode shape ONLY
         if (!showMap.has(show.id)) {
           showMap.set(show.id, {
             show,
@@ -285,18 +283,24 @@ async function build() {
   }
 
   // =======================
-  // ENRICH (TMDB ONLY ID)
+  // FILTER SHOWS (FIXED)
+  // =======================
+  for (const id of Array.from(showMap.keys())) {
+    if (!qualifiedShows.has(id)) {
+      showMap.delete(id);
+    }
+  }
+
+  // =======================
+  // ENRICH (TMDB ID ONLY)
   // =======================
   for (const entry of showMap.values()) {
-    const imdb = entry.show?.externals?.imdb || null;
-
     const tmdbId = await getTmdbIdForShow(entry.show);
+
     entry.tmdbId = tmdbId;
 
     entry.stremioId =
-      tmdbId ? `tmdb:${tmdbId}` :
-      imdb ? imdb :
-      `tvmaze:${entry.show.id}`;
+      tmdbId ? `tmdb:${tmdbId}` : `tvmaze:${entry.show.id}`;
   }
 
   // =======================
@@ -305,13 +309,9 @@ async function build() {
   const metas = [];
 
   for (const entry of showMap.values()) {
-    if (!entry.stremioId) continue;
-
     const recent = entry.episodes.filter(ep =>
       ep && ep.name && ep.season != null && ep.number != null
     );
-
-    if (!recent.length) continue;
 
     recent.sort(
       (a, b) =>
@@ -327,14 +327,14 @@ async function build() {
       if (!overview && entry.tmdbId) {
         const key = `${entry.tmdbId}:${ep.season}:${ep.number}`;
 
-        if (tmdbEpisodeCache.has(key)) {
-          overview = tmdbEpisodeCache.get(key);
-        } else {
+        if (!tmdbEpisodeCache.has(key)) {
           overview = await tmdbEpisodeOverview(
             entry.tmdbId,
             ep.season,
             ep.number
           );
+        } else {
+          overview = tmdbEpisodeCache.get(key);
         }
       }
 
@@ -362,10 +362,18 @@ async function build() {
     });
   }
 
-  metas.sort(
-    (a, b) =>
-      new Date(b.videos.at(-1)?.released) -
-      new Date(a.videos.at(-1)?.released)
+  // =======================
+  // SORT (FIXED)
+  // =======================
+  function getLatestDate(meta) {
+    return meta.videos.reduce((max, v) => {
+      const d = new Date(v.released);
+      return d > max ? d : max;
+    }, new Date(0));
+  }
+
+  metas.sort((a, b) =>
+    getLatestDate(b) - getLatestDate(a)
   );
 
   fs.mkdirSync(CATALOG_DIR, { recursive: true });
