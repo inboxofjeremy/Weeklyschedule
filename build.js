@@ -17,6 +17,13 @@ async function fetchJSON(url) {
   }
 }
 
+function cleanHTML(s) {
+  return s ? s.replace(/<[^>]+>/g, "").trim() : "";
+}
+
+// --------------------
+// SHOW FILTER SIGNAL ONLY
+// --------------------
 function pacificDateString(date = new Date()) {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "America/Los_Angeles",
@@ -25,19 +32,11 @@ function pacificDateString(date = new Date()) {
     day: "2-digit"
   }).formatToParts(date);
 
-  const y = parts.find(p => p.type === "year").value;
-  const m = parts.find(p => p.type === "month").value;
-  const d = parts.find(p => p.type === "day").value;
-
-  return `${y}-${m}-${d}`;
-}
-
-function cleanHTML(s) {
-  return s ? s.replace(/<[^>]+>/g, "").trim() : "";
+  return `${parts[0].value}-${parts[2].value}-${parts[4].value}`;
 }
 
 // --------------------
-// TMDB ID ONLY
+// TMDB ID (unchanged)
 // --------------------
 async function getTmdbId(show) {
   if (tmdbCache.has(show.id)) return tmdbCache.get(show.id);
@@ -48,14 +47,15 @@ async function getTmdbId(show) {
     `&query=${encodeURIComponent(show.name)}`;
 
   const data = await fetchJSON(url);
-  const id = data?.results?.[0]?.id || null;
 
+  const id = data?.results?.[0]?.id || null;
   tmdbCache.set(show.id, id);
+
   return id;
 }
 
 // --------------------
-// FULL EPISODES (ONLY SOURCE OF TRUTH)
+// FULL EPISODES (correct source)
 // --------------------
 async function getAllEpisodes(showId) {
   return await fetchJSON(
@@ -69,7 +69,7 @@ async function getAllEpisodes(showId) {
 async function build() {
   const showMap = new Map();
 
-  // STEP 1: find qualifying shows (last 10 days ONLY)
+  // STEP 1: ONLY detect recent activity via schedule
   for (let i = 0; i < DAYS_BACK; i++) {
     const d = new Date();
     d.setDate(d.getDate() - i);
@@ -86,24 +86,25 @@ async function build() {
       const show = ep.show;
       if (!show?.id) continue;
 
-      if (!showMap.has(show.id)) {
-        showMap.set(show.id, {
-          show,
-          lastSeen: dateStr
-        });
-      }
+      // only mark show as active
+      showMap.set(show.id, {
+        show,
+        lastSeen: dateStr,
+        episodes: null
+      });
     }
   }
 
-  // STEP 2: FULL EPISODES (correct + stable)
+  // STEP 2: FULL EPISODES (always complete season)
   for (const entry of showMap.values()) {
     const eps = await getAllEpisodes(entry.show.id);
     entry.episodes = Array.isArray(eps) ? eps : [];
   }
 
-  // STEP 3: TMDB ID
+  // STEP 3: TMDB ID only
   for (const entry of showMap.values()) {
     const tmdbId = await getTmdbId(entry.show);
+
     entry.stremioId = tmdbId
       ? `tmdb:${tmdbId}`
       : `tvmaze:${entry.show.id}`;
@@ -135,7 +136,7 @@ async function build() {
     });
   }
 
-  // SORT BY RECENT ACTIVITY (SAFE)
+  // STEP 5: SORT BY LAST ACTIVITY (FIXED STABLE)
   metas.sort((a, b) => {
     const aDate = new Date(a.videos.at(-1)?.released || 0);
     const bDate = new Date(b.videos.at(-1)?.released || 0);
