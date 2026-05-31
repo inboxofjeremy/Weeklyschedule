@@ -15,7 +15,7 @@ const CATALOG_DIR = path.join(OUT_DIR, "catalog", "series");
 const DAYS_BACK = 10;
 
 // =======================
-// TVMAZE RATE LIMIT
+// RATE LIMIT
 // =======================
 const TVMAZE_DELAY_MS = 150;
 let lastTvmazeCall = 0;
@@ -24,7 +24,6 @@ let lastTvmazeCall = 0;
 // CACHE
 // =======================
 const tmdbCache = new Map();
-const tmdbEpisodeCache = new Map();
 
 // =======================
 // FETCH
@@ -58,12 +57,6 @@ async function fetchJSON(url) {
 const cleanHTML = s =>
   s ? s.replace(/<[^>]+>/g, "").trim() : "";
 
-function getStrictEpisodeDate(ep) {
-  return ep?.airdate && ep.airdate !== "0000-00-00"
-    ? ep.airdate
-    : ep?.airstamp?.slice(0, 10) || null;
-}
-
 function pacificDateString(date = new Date()) {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "America/Los_Angeles",
@@ -77,34 +70,6 @@ function pacificDateString(date = new Date()) {
   const d = parts.find(p => p.type === "day").value;
 
   return `${y}-${m}-${d}`;
-}
-
-// =======================
-// NORMALIZE (kept as-is)
-// =======================
-function normalizeEarlyStreamingDate(epDate, show) {
-  if (!epDate) return null;
-
-  const networkName = (
-    show?.network?.name ||
-    show?.webChannel?.name ||
-    ""
-  ).toLowerCase();
-
-  const isStreaming =
-    networkName.includes("apple") ||
-    networkName.includes("netflix") ||
-    networkName.includes("hulu") ||
-    networkName.includes("amazon") ||
-    networkName.includes("disney");
-
-  const date = new Date(epDate + "T00:00:00Z");
-
-  if (isStreaming) {
-    date.setUTCDate(date.getUTCDate() - 1);
-  }
-
-  return date.toISOString().slice(0, 10);
 }
 
 // =======================
@@ -135,29 +100,6 @@ function isForeign(show) {
   return c && !allowed.includes(c.toUpperCase());
 }
 
-function isBlockedWebChannel(show) {
-  return (show?.webChannel?.name || "").toLowerCase() === "iqiyi";
-}
-
-function isYouTubeShow(show) {
-  return (show?.webChannel?.name || "").toLowerCase().includes("youtube");
-}
-
-function isDocumentary(show) {
-  return (
-    (show.type || "").toLowerCase() === "documentary" ||
-    (show.genres || []).some(g => g?.toLowerCase() === "documentary")
-  );
-}
-
-function isBlockedPlatform(show) {
-  return (show?.webChannel?.name || "").toLowerCase() === "tubi";
-}
-
-function isLegal(show) {
-  return (show.genres || []).some(g => g?.toLowerCase() === "legal");
-}
-
 function isBlockedLanguage(show) {
   const blocked = [
     "italian","turkish","indonesian","spanish","thai",
@@ -169,7 +111,7 @@ function isBlockedLanguage(show) {
 }
 
 // =======================
-// TMDB (unchanged logic, cached)
+// TMDB (unchanged)
 // =======================
 async function getTmdbIdForShow(show) {
   if (tmdbCache.has(show.id)) {
@@ -193,25 +135,13 @@ async function getTmdbIdForShow(show) {
   return id;
 }
 
-async function tmdbEpisodeOverview(tmdbId, season, episode) {
-  if (!tmdbId || !season || !episode) return null;
-
-  const key = `${tmdbId}:${season}:${episode}`;
-  if (tmdbEpisodeCache.has(key)) {
-    return tmdbEpisodeCache.get(key);
-  }
-
-  const url =
-    `https://api.themoviedb.org/3/tv/${tmdbId}` +
-    `/season/${season}/episode/${episode}` +
-    `?api_key=${TMDB_API_KEY}`;
-
-  const data = await fetchJSON(url);
-
-  const overview = data?.overview?.trim() || null;
-  tmdbEpisodeCache.set(key, overview);
-
-  return overview;
+// =======================
+// FULL EPISODES (FIX)
+// =======================
+async function getFullEpisodes(showId) {
+  return await fetchJSON(
+    `https://api.tvmaze.com/shows/${showId}/episodes`
+  );
 }
 
 // =======================
@@ -219,10 +149,9 @@ async function tmdbEpisodeOverview(tmdbId, season, episode) {
 // =======================
 async function build() {
   const showMap = new Map();
-  const qualifiedShows = new Set();
 
   // =======================
-  // TVMAZE COLLECTION (FIXED)
+  // STEP 1: FIND RELEVANT SHOWS (schedule only used for discovery)
   // =======================
   for (let i = 0; i < DAYS_BACK; i++) {
     const d = new Date();
@@ -230,150 +159,89 @@ async function build() {
 
     const dateStr = pacificDateString(d);
 
-    for (const url of [
-      `https://api.tvmaze.com/schedule?country=US&date=${dateStr}`,
-      `https://api.tvmaze.com/schedule/web?date=${dateStr}`,
-      `https://api.tvmaze.com/schedule/full?date=${dateStr}`
-    ]) {
-      const list = await fetchJSON(url);
-      if (!Array.isArray(list)) continue;
+    const list = await fetchJSON(
+      `https://api.tvmaze.com/schedule?country=US&date=${dateStr}`
+    );
 
-      for (const ep of list) {
-        const show = ep.show || ep._embedded?.show;
-        if (!show?.id) continue;
+    if (!Array.isArray(list)) continue;
 
-        if (
-          isSports(show) ||
-          isForeign(show) ||
-          isBlockedLanguage(show) ||
-          isDocumentary(show) ||
-          isBlockedWebChannel(show) ||
-          isYouTubeShow(show) ||
-          isLegal(show) ||
-          isBlockedPlatform(show) ||
-          isNews(show)
-        ) continue;
+    for (const ep of list) {
+      const show = ep.show;
+      if (!show?.id) continue;
 
-        const rawDate = getStrictEpisodeDate(ep);
-        if (!rawDate) continue;
+      if (
+        isSports(show) ||
+        isForeign(show) ||
+        isBlockedLanguage(show) ||
+        isNews(show)
+      ) continue;
 
-        const epDate = normalizeEarlyStreamingDate(rawDate, show);
-
-        // FIX: only use this to qualify shows, NOT filter episodes
-        qualifiedShows.add(show.id);
-
-        if (!showMap.has(show.id)) {
-          showMap.set(show.id, {
-            show,
-            episodes: []
-          });
-        }
-
-        showMap.get(show.id).episodes.push({
-          id: ep.id,
-          name: ep.name,
-          season: ep.season,
-          number: ep.number,
-          summary: ep.summary,
-          airdate: ep.airdate,
-          airstamp: ep.airstamp
+      if (!showMap.has(show.id)) {
+        showMap.set(show.id, {
+          show,
+          lastAirDate: dateStr,
+          episodes: []
         });
       }
     }
   }
 
   // =======================
-  // FILTER SHOWS (FIXED)
+  // STEP 2: GET FULL EPISODES (FIX CORE ISSUE)
   // =======================
-  for (const id of Array.from(showMap.keys())) {
-    if (!qualifiedShows.has(id)) {
-      showMap.delete(id);
+  for (const entry of showMap.values()) {
+    const full = await getFullEpisodes(entry.show.id);
+
+    if (Array.isArray(full)) {
+      entry.episodes = full;
     }
   }
 
   // =======================
-  // ENRICH (TMDB ID ONLY)
+  // STEP 3: ENRICH TMDB ID ONLY
   // =======================
   for (const entry of showMap.values()) {
     const tmdbId = await getTmdbIdForShow(entry.show);
-
-    entry.tmdbId = tmdbId;
 
     entry.stremioId =
       tmdbId ? `tmdb:${tmdbId}` : `tvmaze:${entry.show.id}`;
   }
 
   // =======================
-  // OUTPUT
+  // STEP 4: BUILD OUTPUT
   // =======================
   const metas = [];
 
   for (const entry of showMap.values()) {
-    const recent = entry.episodes.filter(ep =>
-      ep && ep.name && ep.season != null && ep.number != null
-    );
-
-    recent.sort(
-      (a, b) =>
-        new Date(getStrictEpisodeDate(a)) -
-        new Date(getStrictEpisodeDate(b))
-    );
-
-    const videos = [];
-
-    for (const ep of recent) {
-      let overview = cleanHTML(ep.summary);
-
-      if (!overview && entry.tmdbId) {
-        const key = `${entry.tmdbId}:${ep.season}:${ep.number}`;
-
-        if (!tmdbEpisodeCache.has(key)) {
-          overview = await tmdbEpisodeOverview(
-            entry.tmdbId,
-            ep.season,
-            ep.number
-          );
-        } else {
-          overview = tmdbEpisodeCache.get(key);
-        }
-      }
-
-      videos.push({
+    const videos = entry.episodes
+      .filter(ep => ep?.name)
+      .map(ep => ({
         id: `${entry.stremioId}:${ep.season}:${ep.number}`,
         title: ep.name,
         season: ep.season,
         episode: ep.number,
-        released: getStrictEpisodeDate(ep),
-        overview
-      });
-    }
+        released: ep.airdate,
+        overview: cleanHTML(ep.summary)
+      }))
+      .sort((a, b) => new Date(a.released) - new Date(b.released));
 
     metas.push({
       id: entry.stremioId,
       type: "series",
       name: entry.show.name,
       description: cleanHTML(entry.show.summary),
-      poster:
-        entry.show.image?.original ||
-        entry.show.image?.medium ||
-        null,
+      poster: entry.show.image?.original || entry.show.image?.medium || null,
       background: entry.show.image?.original || null,
       videos
     });
   }
 
   // =======================
-  // SORT (FIXED)
+  // SORT SHOWS BY LAST AIR DATE
   // =======================
-  function getLatestDate(meta) {
-    return meta.videos.reduce((max, v) => {
-      const d = new Date(v.released);
-      return d > max ? d : max;
-    }, new Date(0));
-  }
-
   metas.sort((a, b) =>
-    getLatestDate(b) - getLatestDate(a)
+    new Date(b.videos.at(-1)?.released || 0) -
+    new Date(a.videos.at(-1)?.released || 0)
   );
 
   fs.mkdirSync(CATALOG_DIR, { recursive: true });
