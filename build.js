@@ -346,7 +346,7 @@ async function build() {
   }
 
   // =======================
-  // 🔧 FIX ONLY (ADDED - NO OTHER CHANGES)
+  // 🔧 FIX (CORRECTED MERGE - ONLY CHANGE)
   // =======================
   for (const entry of showMap.values()) {
 
@@ -354,20 +354,22 @@ async function build() {
       `https://api.tvmaze.com/shows/${entry.show.id}/episodes`
     );
 
-    if (!Array.isArray(full)) continue;
-
     const map = new Map();
 
-    // schedule episodes first
+    // 1. schedule episodes FIRST (authoritative)
     for (const ep of entry.episodes) {
-      map.set(`${ep.season}-${ep.number}`, ep);
+      const key = `${ep.season || 0}-${ep.number || 0}`;
+      map.set(key, ep);
     }
 
-    // fill missing episodes from full list
-    for (const ep of full) {
-      const key = `${ep.season}-${ep.number}`;
-      if (!map.has(key)) {
-        map.set(key, ep);
+    // 2. ONLY fill missing from full endpoint (no override)
+    if (Array.isArray(full)) {
+      for (const ep of full) {
+        const key = `${ep.season || 0}-${ep.number || 0}`;
+
+        if (!map.has(key)) {
+          map.set(key, ep);
+        }
       }
     }
 
