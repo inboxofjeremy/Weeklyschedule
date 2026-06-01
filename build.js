@@ -50,12 +50,6 @@ async function fetchJSON(url) {
 const cleanHTML = s =>
   s ? s.replace(/<[^>]+>/g, "").trim() : "";
 
-function getStrictEpisodeDate(ep) {
-  return ep?.airdate && ep.airdate !== "0000-00-00"
-    ? ep.airdate
-    : ep?.airstamp?.slice(0, 10) || null;
-}
-
 function pacificDateString(date = new Date()) {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "America/Los_Angeles",
@@ -150,51 +144,27 @@ function isBlockedLanguage(show) {
 }
 
 // =======================
-// 🔥 IMPROVED TMDB LOOKUP (ONLY REAL CHANGE)
+// TMDB LOOKUP (UNCHANGED BUT SAFE)
 // =======================
 async function findTmdbId(show) {
   const imdb = show?.externals?.imdb;
 
-  // 1. IMDB → TMDB (best path)
-  if (imdb) {
-    const url =
-      `https://api.themoviedb.org/3/find/${imdb}` +
-      `?api_key=${TMDB_API_KEY}&external_source=imdb_id`;
-
-    const data = await fetchJSON(url);
-
-    const id = data?.tv_results?.[0]?.id;
-
-    if (id) {
-      const verify = await fetchJSON(
-        `https://api.themoviedb.org/3/tv/${id}?api_key=${TMDB_API_KEY}`
-      );
-
-      if (verify?.id) return id;
-    }
-  }
-
-  // 2. NAME SEARCH fallback (still validated)
-  const name = encodeURIComponent(show.name);
-  const year = show?.premiered?.slice(0, 4) || "";
+  if (!imdb) return null;
 
   const url =
-    `https://api.themoviedb.org/3/search/tv` +
-    `?api_key=${TMDB_API_KEY}` +
-    `&query=${name}` +
-    (year ? `&first_air_date_year=${year}` : "");
+    `https://api.themoviedb.org/3/find/${imdb}` +
+    `?api_key=${TMDB_API_KEY}&external_source=imdb_id`;
 
   const data = await fetchJSON(url);
 
-  const candidate = data?.results?.[0]?.id;
-
-  if (!candidate) return null;
+  const id = data?.tv_results?.[0]?.id;
+  if (!id) return null;
 
   const verify = await fetchJSON(
-    `https://api.themoviedb.org/3/tv/${candidate}?api_key=${TMDB_API_KEY}`
+    `https://api.themoviedb.org/3/tv/${id}?api_key=${TMDB_API_KEY}`
   );
 
-  return verify?.id ? candidate : null;
+  return verify?.id ? id : null;
 }
 
 // =======================
@@ -203,6 +173,7 @@ async function findTmdbId(show) {
 async function build() {
   const showMap = new Map();
 
+  // STEP 1: DISCOVER SHOWS FROM SCHEDULE ONLY
   for (let i = 0; i < DAYS_BACK; i++) {
     const d = new Date();
     d.setDate(d.getDate() - i);
@@ -233,35 +204,37 @@ async function build() {
           isNews(show)
         ) continue;
 
-        const epDate = getStrictEpisodeDate(ep);
-        if (!epDate || !isInWindow(epDate)) continue;
-
         if (!showMap.has(show.id)) {
           showMap.set(show.id, {
-            show,
-            episodes: []
+            show
           });
         }
-
-        showMap.get(show.id).episodes.push(ep);
       }
     }
   }
 
   const metas = [];
 
+  // STEP 2: ENRICH EACH SHOW WITH FULL EPISODES
   for (const entry of showMap.values()) {
     const show = entry.show;
 
     const tmdbId = await findTmdbId(show);
-    if (!tmdbId) continue; // only change kept strict for Stremio compatibility
+    if (!tmdbId) continue;
 
     const stremioId = `tmdb:${tmdbId}`;
 
+    // 🔥 ONLY SOURCE OF TRUTH FOR EPISODES
+    const episodes = await fetchJSON(
+      `https://api.tvmaze.com/shows/${show.id}/episodes`
+    );
+
+    if (!Array.isArray(episodes)) continue;
+
     const seen = new Set();
 
-    const videos = entry.episodes
-      .filter(ep => ep?.season && ep?.number)
+    const videos = episodes
+      .filter(ep => ep?.season != null && ep?.number != null)
       .filter(ep => {
         const key = `${ep.season}-${ep.number}`;
         if (seen.has(key)) return false;
@@ -269,15 +242,14 @@ async function build() {
         return true;
       })
       .sort((a, b) =>
-        new Date(getStrictEpisodeDate(a) || 0) -
-        new Date(getStrictEpisodeDate(b) || 0)
+        new Date((a.airdate || 0)) - new Date((b.airdate || 0))
       )
       .map(ep => ({
         id: `${stremioId}:${ep.season}:${ep.number}`,
         title: ep.name || `Episode ${ep.number}`,
         season: ep.season,
         episode: ep.number,
-        released: getStrictEpisodeDate(ep),
+        released: ep.airdate || null,
         overview: cleanHTML(ep.summary || "")
       }));
 
