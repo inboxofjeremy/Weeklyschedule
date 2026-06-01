@@ -4,8 +4,6 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
-  schedule:
-    - cron: "0 8 * * *"
 
 permissions:
   contents: read
@@ -16,39 +14,32 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
       
-      - name: Install dependencies
+      - name: Install
         run: npm install || true
       
-      - name: Build site
-        env:
-          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
-        run: node build.js
-      
-      - name: Add Manifest
-        # Ensures manifest.json is in the root of the public/ folder for deployment
+      - name: Build
+        env: { TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }} }
         run: |
-          if [ -f manifest.json ]; then
-            cp manifest.json public/
-          fi
+          mkdir -p public/catalog/series
+          mkdir -p public/meta/series
+          node build.js
       
-      - name: Upload artifact
-        uses: actions/upload-pages-artifact@v4
-        with:
-          path: public
+      - name: Debug Output
+        run: |
+          cp manifest.json public/
+          echo "Listing files in public/:"
+          ls -R public/
+      
+      - uses: actions/upload-pages-artifact@v4
+        with: { path: public }
 
   deploy:
     needs: build
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
+    environment: { name: github-pages }
     steps:
-      - name: Deploy to GitHub Pages
-        uses: actions/deploy-pages@v4
+      - uses: actions/deploy-pages@v4
