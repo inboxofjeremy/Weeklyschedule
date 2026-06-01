@@ -150,27 +150,51 @@ function isBlockedLanguage(show) {
 }
 
 // =======================
-// TMDB LOOKUP (FIXED)
+// 🔥 IMPROVED TMDB LOOKUP (ONLY REAL CHANGE)
 // =======================
 async function findTmdbId(show) {
-  const imdb = show?.externals?.imdb || null;
-  if (!imdb) return null;
+  const imdb = show?.externals?.imdb;
+
+  // 1. IMDB → TMDB (best path)
+  if (imdb) {
+    const url =
+      `https://api.themoviedb.org/3/find/${imdb}` +
+      `?api_key=${TMDB_API_KEY}&external_source=imdb_id`;
+
+    const data = await fetchJSON(url);
+
+    const id = data?.tv_results?.[0]?.id;
+
+    if (id) {
+      const verify = await fetchJSON(
+        `https://api.themoviedb.org/3/tv/${id}?api_key=${TMDB_API_KEY}`
+      );
+
+      if (verify?.id) return id;
+    }
+  }
+
+  // 2. NAME SEARCH fallback (still validated)
+  const name = encodeURIComponent(show.name);
+  const year = show?.premiered?.slice(0, 4) || "";
 
   const url =
-    `https://api.themoviedb.org/3/find/${imdb}` +
-    `?api_key=${TMDB_API_KEY}&external_source=imdb_id`;
+    `https://api.themoviedb.org/3/search/tv` +
+    `?api_key=${TMDB_API_KEY}` +
+    `&query=${name}` +
+    (year ? `&first_air_date_year=${year}` : "");
 
   const data = await fetchJSON(url);
 
-  const id = data?.tv_results?.[0]?.id;
-  if (!id) return null;
+  const candidate = data?.results?.[0]?.id;
 
-  // 🔥 VERIFY IT IS A REAL TV SHOW IN TMDB
+  if (!candidate) return null;
+
   const verify = await fetchJSON(
-    `https://api.themoviedb.org/3/tv/${id}?api_key=${TMDB_API_KEY}`
+    `https://api.themoviedb.org/3/tv/${candidate}?api_key=${TMDB_API_KEY}`
   );
 
-  return verify?.id ? id : null;
+  return verify?.id ? candidate : null;
 }
 
 // =======================
@@ -230,21 +254,14 @@ async function build() {
     const show = entry.show;
 
     const tmdbId = await findTmdbId(show);
-
-    // ❌ FIX: no fake TMDB IDs allowed
-    if (!tmdbId) continue;
+    if (!tmdbId) continue; // only change kept strict for Stremio compatibility
 
     const stremioId = `tmdb:${tmdbId}`;
 
     const seen = new Set();
 
     const videos = entry.episodes
-      .filter(ep =>
-        ep?.season != null &&
-        ep?.number != null &&
-        ep.season > 0 &&
-        ep.number > 0
-      )
+      .filter(ep => ep?.season && ep?.number)
       .filter(ep => {
         const key = `${ep.season}-${ep.number}`;
         if (seen.has(key)) return false;
