@@ -1,7 +1,7 @@
 import fs from "fs";
 import path from "path";
 
-const OUT_DIR = "./";
+const OUT_DIR = "./public";
 const CATALOG_DIR = path.join(OUT_DIR, "catalog", "series");
 const DAYS_BACK = 10;
 
@@ -17,9 +17,6 @@ async function fetchJSON(url) {
 
 const clean = s => (s ? s.replace(/<[^>]+>/g, "").trim() : "");
 
-// =======================
-// MAIN BUILD
-// =======================
 async function build() {
   const showMap = new Map();
 
@@ -53,9 +50,6 @@ async function build() {
   const metas = [];
 
   for (const { show, episodes } of showMap.values()) {
-    if (!episodes.length) continue;
-
-    // 🔥 TVMAZE IS THE ONLY ID SYSTEM
     const id = `tvmaze:${show.id}`;
 
     const seen = new Set();
@@ -83,10 +77,8 @@ async function build() {
       type: "series",
       name: show.name,
       description: clean(show.summary),
-
       poster: show.image?.original || show.image?.medium || null,
       background: show.image?.original || null,
-
       videos
     });
   }
