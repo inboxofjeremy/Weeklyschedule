@@ -1,7 +1,7 @@
 import fs from "fs";
 import path from "path";
 
-const OUT_FILE = path.join("catalog", "series", "tvmaze_weekly_schedule.json");
+const OUT_FILE = path.join("public", "catalog", "series", "tvmaze_weekly_schedule.json");
 const DAYS_BACK = 10;
 
 async function fetchJSON(url) {
@@ -52,7 +52,6 @@ async function build() {
     const id = `tvmaze:${show.id}`;
 
     const seen = new Set();
-
     const videos = [];
 
     for (const ep of episodes) {
@@ -85,7 +84,7 @@ async function build() {
 
   fs.writeFileSync(OUT_FILE, JSON.stringify({ metas }, null, 2));
 
-  console.log("Built:", metas.length);
+  console.log("Built:", metas.length, "shows");
 }
 
 build();
