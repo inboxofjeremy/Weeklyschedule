@@ -1,22 +1,11 @@
-/**
- * build.js — Stremio static catalog (TVMaze authority version)
- * Option B: TVMaze ID routing + TMDB enrichment only
- */
-
 import fs from "fs";
 import path from "path";
 
-// =======================
-// CONFIG
-// =======================
-const TMDB_API_KEY = "944017b839d3c040bdd2574083e4c1bc";
 const OUT_DIR = "./";
 const CATALOG_DIR = path.join(OUT_DIR, "catalog", "series");
+
 const DAYS_BACK = 10;
 
-// =======================
-// FETCH
-// =======================
 async function fetchJSON(url) {
   try {
     const res = await fetch(url);
@@ -27,38 +16,10 @@ async function fetchJSON(url) {
   }
 }
 
-// =======================
-// HELPERS
-// =======================
-const cleanHTML = s =>
-  s ? s.replace(/<[^>]+>/g, "").trim() : "";
+const clean = s => (s ? s.replace(/<[^>]+>/g, "").trim() : "");
 
 // =======================
-// TMDB LOOKUP (metadata only)
-// =======================
-async function findTmdbId(show) {
-  const imdb = show?.externals?.imdb;
-
-  if (imdb) {
-    const data = await fetchJSON(
-      `https://api.themoviedb.org/3/find/${imdb}?api_key=${TMDB_API_KEY}&external_source=imdb_id`
-    );
-
-    const id = data?.tv_results?.[0]?.id;
-    if (id) return id;
-  }
-
-  const name = encodeURIComponent(show.name);
-
-  const data = await fetchJSON(
-    `https://api.themoviedb.org/3/search/tv?api_key=${TMDB_API_KEY}&query=${name}`
-  );
-
-  return data?.results?.[0]?.id || null;
-}
-
-// =======================
-// MAIN BUILD
+// BUILD
 // =======================
 async function build() {
   const showMap = new Map();
@@ -66,58 +27,63 @@ async function build() {
   for (let i = 0; i < DAYS_BACK; i++) {
     const d = new Date();
     d.setDate(d.getDate() - i);
+    const date = d.toISOString().slice(0, 10);
 
-    const dateStr = d.toISOString().slice(0, 10);
-
-    const list = await fetchJSON(
-      `https://api.tvmaze.com/schedule?country=US&date=${dateStr}`
+    const schedule = await fetchJSON(
+      `https://api.tvmaze.com/schedule?country=US&date=${date}`
     );
 
-    if (!Array.isArray(list)) continue;
+    if (!Array.isArray(schedule)) continue;
 
-    for (const ep of list) {
+    for (const ep of schedule) {
       const show = ep.show;
       if (!show?.id) continue;
 
-      showMap.set(show.id, { show });
+      if (!showMap.has(show.id)) {
+        showMap.set(show.id, {
+          show,
+          episodes: []
+        });
+      }
+
+      showMap.get(show.id).episodes.push(ep);
     }
   }
 
   const metas = [];
 
-  for (const { show } of showMap.values()) {
-    const tmdbId = await findTmdbId(show);
+  for (const { show, episodes } of showMap.values()) {
+    if (!episodes.length) continue;
 
-    // =====================================================
-    // IMPORTANT: TVMAZE IS THE ONLY ID USED BY STREMIO
-    // =====================================================
-    const stremioId = `tvmaze:${show.id}`;
+    // =========================================
+    // 🔥 CRITICAL FIX: TVMAZE ONLY ID SYSTEM
+    // =========================================
+    const id = `tvmaze:${show.id}`;
 
-    const episodes = await fetchJSON(
-      `https://api.tvmaze.com/shows/${show.id}/episodes`
-    );
+    const videos = [];
 
-    if (!Array.isArray(episodes)) continue;
+    const seen = new Set();
 
-    const videos = episodes.map(ep => ({
-      id: `${stremioId}:${ep.season}:${ep.number}`,
+    for (const ep of episodes) {
+      const key = `${ep.season}-${ep.number}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
 
-      title: ep.name || `Episode ${ep.number}`,
-      season: ep.season,
-      episode: ep.number,
-
-      released: ep.airdate || null,
-      overview: cleanHTML(ep.summary || ""),
-
-      // optional enrichment only (ignored by Stremio logic)
-      tmdbId
-    }));
+      videos.push({
+        id: `${id}:${ep.season}:${ep.number}`,
+        title: ep.name || `Episode ${ep.number}`,
+        season: ep.season,
+        episode: ep.number,
+        released: ep.airdate,
+        overview: clean(ep.summary || "")
+      });
+    }
 
     metas.push({
-      id: stremioId,
+      id,
       type: "series",
       name: show.name,
-      description: cleanHTML(show.summary),
+      description: clean(show.summary),
 
       poster: show.image?.original || show.image?.medium || null,
       background: show.image?.original || null,
@@ -133,10 +99,7 @@ async function build() {
     JSON.stringify({ metas }, null, 2)
   );
 
-  console.log("Build complete:", metas.length, "shows");
+  console.log("Build complete:", metas.length);
 }
 
-build().catch(err => {
-  console.error(err);
-  process.exit(1);
-});
+build();
