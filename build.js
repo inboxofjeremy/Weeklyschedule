@@ -1,7 +1,7 @@
 import fs from "fs";
 import path from "path";
 
-const OUT_FILE = path.join("public", "catalog", "series", "tvmaze_weekly_schedule.json");
+const OUT_FILE = path.join("catalog", "series", "tvmaze_weekly_schedule.json");
 const DAYS_BACK = 10;
 
 async function fetchJSON(url) {
@@ -80,11 +80,16 @@ async function build() {
     });
   }
 
+  // 🔥 CRITICAL: ensure folder exists
   fs.mkdirSync(path.dirname(OUT_FILE), { recursive: true });
 
   fs.writeFileSync(OUT_FILE, JSON.stringify({ metas }, null, 2));
 
-  console.log("Built:", metas.length, "shows");
+  console.log("Built catalog file:", OUT_FILE);
+  console.log("Shows:", metas.length);
 }
 
-build();
+build().catch(err => {
+  console.error("BUILD FAILED:", err);
+  process.exit(1);
+});
