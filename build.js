@@ -58,11 +58,15 @@ function pacificDateString(date = new Date()) {
 }
 
 // =======================
-// FILTERS (unchanged logic)
+// FILTERS
 // =======================
 function isBlocked(show) {
   const lang = (show.language || "").toLowerCase();
-  const blockedLangs = ["italian","turkish","indonesian","spanish","thai","arabic","norwegian","german","chinese","korean","french","hindi"];
+  const blockedLangs = [
+    "italian","turkish","indonesian","spanish","thai",
+    "arabic","norwegian","german","chinese","korean",
+    "french","hindi"
+  ];
   return blockedLangs.includes(lang);
 }
 
@@ -97,31 +101,32 @@ async function build() {
   }
 
   // =======================
-  // STEP 2: FETCH FULL SHOW DATA
+  // STEP 2: FETCH FULL SHOW DATA (WITH EPISODES)
   // =======================
   const metas = [];
 
-  for (const [id, basicShow] of showIds.entries()) {
+  for (const [id] of showIds.entries()) {
     const full = await fetchJSON(
       `https://api.tvmaze.com/shows/${id}?embed=episodes`
     );
 
     if (!full?._embedded?.episodes) continue;
 
-    const imdb = full.externals?.imdb || null;
-    const stremioId = imdb || `tvmaze:${id}`;
+    const stremioId =
+      full.externals?.imdb || `tvmaze:${id}`;
 
-    const videos = full._embedded.episodes
+    const episodes = full._embedded.episodes
       .filter(e => e.airdate)
-      .map(ep => ({
-        id: `${stremioId}:${ep.season}:${ep.number}`,
-        title: ep.name,
-        season: ep.season,
-        episode: ep.number,
-        released: ep.airdate,
-        overview: cleanHTML(ep.summary)
-      }))
-      .sort((a, b) => new Date(a.released) - new Date(b.released));
+      .sort((a, b) => new Date(a.airdate) - new Date(b.airdate));
+
+    const videos = episodes.map(ep => ({
+      id: `${stremioId}:${ep.season}:${ep.number}`,
+      title: ep.name,
+      season: ep.season,
+      episode: ep.number,
+      released: ep.airdate,
+      overview: cleanHTML(ep.summary)
+    }));
 
     if (!videos.length) continue;
 
@@ -136,7 +141,7 @@ async function build() {
     });
   }
 
-  // sort newest first
+  // newest first
   metas.sort(
     (a, b) =>
       new Date(b.videos[b.videos.length - 1].released) -
@@ -145,8 +150,11 @@ async function build() {
 
   fs.mkdirSync(CATALOG_DIR, { recursive: true });
 
+  // =======================
+  // OUTPUT (RESTORED NAME)
+  // =======================
   fs.writeFileSync(
-    path.join(CATALOG_DIR, "tvmaze_full_metadata.json"),
+    path.join(CATALOG_DIR, "tvmaze_weekly_schedule.json"),
     JSON.stringify({ metas }, null, 2)
   );
 
