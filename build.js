@@ -29,7 +29,7 @@ async function fetchJSON(url) {
       );
 
       if (wait) {
-        await new Promise(r => setTimeout(r, wait));
+        await new Promise(r => setTimeout(r));
       }
 
       lastTvmazeCall = Date.now();
@@ -72,6 +72,21 @@ function pacificDateString(date = new Date()) {
 }
 
 // =======================
+// WINDOW FIX (ONLY REAL CHANGE)
+// =======================
+function isInWindow(epDate) {
+  if (!epDate) return false;
+
+  const today = new Date();
+  const start = new Date();
+  start.setDate(today.getDate() - (DAYS_BACK - 1));
+
+  const d = new Date(epDate + "T00:00:00Z");
+
+  return d >= start && d <= today;
+}
+
+// =======================
 // FILTERS (UNCHANGED)
 // =======================
 function isSports(show) {
@@ -83,12 +98,16 @@ function isSports(show) {
 
 function isNews(show) {
   const t = (show.type || "").toLowerCase();
+  const isPanel = (show.genres || []).some(g =>
+    ["panel", "quiz", "game show"].includes(g?.toLowerCase())
+  );
+
+  if (isPanel) return false;
   return t === "news" || t === "talk show";
 }
 
 function isForeign(show) {
   const allowed = ["US", "GB", "CA", "AU", "IE", "NZ"];
-
   const c =
     show?.network?.country?.code ||
     show?.webChannel?.country?.code ||
@@ -152,13 +171,6 @@ async function findTmdbId(show) {
 async function build() {
   const showMap = new Map();
 
-  const today = new Date();
-  const start = new Date();
-  start.setDate(today.getDate() - (DAYS_BACK - 1));
-
-  // =======================
-  // COLLECT EPISODES
-  // =======================
   for (let i = 0; i < DAYS_BACK; i++) {
     const d = new Date();
     d.setDate(d.getDate() - i);
@@ -192,12 +204,8 @@ async function build() {
         const epDate = getStrictEpisodeDate(ep);
         if (!epDate) continue;
 
-        const dEp = new Date(epDate + "T00:00:00Z");
-
-        // SHOW INCLUSION WINDOW ONLY
-        const inWindow = dEp >= start && dEp <= today;
-
-        if (!showMap.has(show.id) && !inWindow) continue;
+        // 🔥 FINAL FIX: correct window enforcement
+        if (!isInWindow(epDate)) continue;
 
         if (!showMap.has(show.id)) {
           showMap.set(show.id, {
@@ -206,21 +214,16 @@ async function build() {
           });
         }
 
-        // IMPORTANT: no episode filtering
         showMap.get(show.id).episodes.push(ep);
       }
     }
   }
 
-  // =======================
-  // BUILD METAS
-  // =======================
   const metas = [];
 
   for (const entry of showMap.values()) {
     const show = entry.show;
 
-    // OPTION A TMDB SAFE ID
     const tmdbId = await findTmdbId(show);
 
     const stremioId = tmdbId
@@ -241,7 +244,7 @@ async function build() {
       title: ep.name || `Episode ${ep.number || 0}`,
       season: ep.season || 0,
       episode: ep.number || 0,
-      released: getStrictEpisodeDate(ep) || today.toISOString().slice(0,10),
+      released: getStrictEpisodeDate(ep),
       overview: cleanHTML(ep.summary || "")
     }));
 
@@ -263,8 +266,8 @@ async function build() {
 
   metas.sort(
     (a, b) =>
-      new Date(a.videos.at(-1)?.released || 0) -
-      new Date(b.videos.at(-1)?.released || 0)
+      new Date(b.videos.at(-1)?.released || 0) -
+      new Date(a.videos.at(-1)?.released || 0)
   );
 
   fs.mkdirSync(CATALOG_DIR, { recursive: true });
