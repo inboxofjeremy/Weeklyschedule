@@ -128,7 +128,7 @@ function isBlockedLanguage(show) {
 }
 
 // =======================
-// TMDB LOOKUP (UNCHANGED)
+// TMDB LOOKUP (UNCHANGED LOGIC)
 // =======================
 async function findTmdbId(show) {
   const imdb = show?.externals?.imdb;
@@ -215,29 +215,24 @@ async function build() {
 
     if (!Array.isArray(episodes)) continue;
 
-    const seen = new Set();
-
     const videos = episodes
       .filter(ep => ep?.season != null && ep?.number != null)
-      .filter(ep => {
-        const key = `${ep.season}-${ep.number}`;
-        if (seen.has(key)) return false;
-        seen.add(key);
-        return true;
-      })
-      .sort((a, b) =>
-        new Date(a.airdate || 0) - new Date(b.airdate || 0)
-      )
       .map(ep => ({
-        // 🔥 FIXED: collision-proof episode IDs
-        id: `${stremioId}:S${ep.season}:E${String(ep.number).padStart(3, "0")}`,
+        // 🔥 OPTION A FIX: break TMDB reconciliation dependency
+        id: `${stremioId}-S${ep.season}-E${ep.number}-${ep.id}`,
 
         title: ep.name || `Episode ${ep.number}`,
         season: ep.season,
-        episode: ep.number,
+
+        // IMPORTANT: no longer used for grouping logic
+        episode: ep.id,
+
         released: ep.airdate || null,
         overview: cleanHTML(ep.summary || "")
-      }));
+      }))
+      .sort((a, b) =>
+        new Date(a.released || 0) - new Date(b.released || 0)
+      );
 
     metas.push({
       id: stremioId,
