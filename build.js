@@ -1,16 +1,8 @@
-/**
- * build.js — Stremio static catalog (TVMaze full metadata authoritative)
- */
-
 import fs from "fs";
 import path from "path";
 
-// =======================
-// CONFIG
-// =======================
 const TMDB_API_KEY = "944017b839d3c040bdd2574083e4c1bc";
-const OUT_DIR = "./";
-const CATALOG_DIR = path.join(OUT_DIR, "catalog", "series");
+const CATALOG_DIR = path.join("./", "catalog", "series");
 const DAYS_BACK = 10;
 
 const TVMAZE_DELAY_MS = 150;
@@ -44,45 +36,41 @@ async function fetchJSON(url) {
 const cleanHTML = s =>
   s ? s.replace(/<[^>]+>/g, "").trim() : "";
 
-function pacificDateString(date = new Date()) {
-  const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: "America/Los_Angeles",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit"
-  }).formatToParts(date);
-
-  return `${parts.find(p => p.type === "year").value}-${
-    parts.find(p => p.type === "month").value
-  }-${parts.find(p => p.type === "day").value}`;
-}
-
 // =======================
-// FILTERS
+// FILTERS (RESTORED)
 // =======================
-function isBlocked(show) {
-  const lang = (show.language || "").toLowerCase();
-  const blockedLangs = [
+function isBlockedLanguage(show) {
+  const blocked = [
     "italian","turkish","indonesian","spanish","thai",
     "arabic","norwegian","german","chinese","korean",
     "french","hindi"
   ];
-  return blockedLangs.includes(lang);
+
+  return blocked.includes((show.language || "").toLowerCase());
+}
+
+function isNews(show) {
+  const t = (show.type || "").toLowerCase();
+  return t === "news" || t === "talk show";
+}
+
+function isSports(show) {
+  return (show.type || "").toLowerCase() === "sports";
 }
 
 // =======================
 // MAIN
 // =======================
 async function build() {
-  const showIds = new Map();
+  const showMap = new Map();
 
   // =======================
-  // STEP 1: COLLECT SHOW IDS
+  // COLLECT SHOW IDS
   // =======================
   for (let i = 0; i < DAYS_BACK; i++) {
     const d = new Date();
     d.setDate(d.getDate() - i);
-    const dateStr = pacificDateString(d);
+    const dateStr = d.toISOString().slice(0, 10);
 
     const schedule = await fetchJSON(
       `https://api.tvmaze.com/schedule?country=US&date=${dateStr}`
@@ -94,26 +82,33 @@ async function build() {
       const show = ep.show;
       if (!show?.id) continue;
 
-      if (isBlocked(show)) continue;
+      if (
+        isBlockedLanguage(show) ||
+        isNews(show) ||
+        isSports(show)
+      ) continue;
 
-      showIds.set(show.id, show);
+      showMap.set(show.id, show);
     }
   }
 
   // =======================
-  // STEP 2: FETCH FULL SHOW DATA (WITH EPISODES)
+  // BUILD METAS
   // =======================
   const metas = [];
 
-  for (const [id] of showIds.entries()) {
+  for (const [id, show] of showMap.entries()) {
     const full = await fetchJSON(
       `https://api.tvmaze.com/shows/${id}?embed=episodes`
     );
 
     if (!full?._embedded?.episodes) continue;
 
+    // ✅ FIX: stable ID (IMPORTANT)
+    const imdb = full.externals?.imdb;
+
     const stremioId =
-      full.externals?.imdb || `tvmaze:${id}`;
+      imdb ? `tt:${imdb}` : `tvmaze:${id}`;
 
     const episodes = full._embedded.episodes
       .filter(e => e.airdate)
@@ -128,8 +123,6 @@ async function build() {
       overview: cleanHTML(ep.summary)
     }));
 
-    if (!videos.length) continue;
-
     metas.push({
       id: stremioId,
       type: "series",
@@ -141,18 +134,13 @@ async function build() {
     });
   }
 
-  // newest first
-  metas.sort(
-    (a, b) =>
-      new Date(b.videos[b.videos.length - 1].released) -
-      new Date(a.videos[a.videos.length - 1].released)
+  metas.sort((a, b) =>
+    new Date(b.videos.at(-1)?.released || 0) -
+    new Date(a.videos.at(-1)?.released || 0)
   );
 
   fs.mkdirSync(CATALOG_DIR, { recursive: true });
 
-  // =======================
-  // OUTPUT (RESTORED NAME)
-  // =======================
   fs.writeFileSync(
     path.join(CATALOG_DIR, "tvmaze_weekly_schedule.json"),
     JSON.stringify({ metas }, null, 2)
