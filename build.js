@@ -1,5 +1,5 @@
 /**
- * build.js — Stremio static catalog (TVMaze schedule + full episode merge + TMDB ID)
+ * build.js — Stremio static catalog (TVMaze schedule + TMDB ID merge)
  * GitHub Pages ONLY
  */
 
@@ -150,36 +150,20 @@ function isBlockedLanguage(show) {
 }
 
 // =======================
-// TMDB LOOKUP (SAFE)
+// TMDB LOOKUP (UNCHANGED)
 // =======================
 async function findTmdbId(show) {
-  try {
-    let imdb = show?.externals?.imdb;
+  const imdb = show?.externals?.imdb || null;
 
-    if (!imdb) {
-      const full = await fetchJSON(
-        `https://api.tvmaze.com/shows/${show.id}`
-      );
-      imdb = full?.externals?.imdb;
-    }
+  if (!imdb) return null;
 
-    if (imdb) {
-      const data = await fetchJSON(
-        `https://api.themoviedb.org/3/find/${imdb}?api_key=${TMDB_API_KEY}&external_source=imdb_id`
-      );
+  const url =
+    `https://api.themoviedb.org/3/find/${imdb}` +
+    `?api_key=${TMDB_API_KEY}&external_source=imdb_id`;
 
-      const id = data?.tv_results?.[0]?.id;
-      if (id) return id;
-    }
+  const data = await fetchJSON(url);
 
-    const search = await fetchJSON(
-      `https://api.themoviedb.org/3/search/tv?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(show.name)}`
-    );
-
-    return search?.results?.[0]?.id || null;
-  } catch {
-    return null;
-  }
+  return data?.tv_results?.[0]?.id || null;
 }
 
 // =======================
@@ -188,9 +172,6 @@ async function findTmdbId(show) {
 async function build() {
   const showMap = new Map();
 
-  // =========================
-  // STEP 1: DISCOVER SHOWS (schedule only)
-  // =========================
   for (let i = 0; i < DAYS_BACK; i++) {
     const d = new Date();
     d.setDate(d.getDate() - i);
@@ -227,24 +208,17 @@ async function build() {
         if (!showMap.has(show.id)) {
           showMap.set(show.id, {
             show,
-            scheduleEpisodes: new Map()
+            episodes: []
           });
         }
 
-        const entry = showMap.get(show.id);
-        entry.scheduleEpisodes.set(
-          `${ep.season}-${ep.number}`,
-          epDate
-        );
+        showMap.get(show.id).episodes.push(ep);
       }
     }
   }
 
   const metas = [];
 
-  // =========================
-  // STEP 2: ENRICH EACH SHOW
-  // =========================
   for (const entry of showMap.values()) {
     const show = entry.show;
 
@@ -254,33 +228,38 @@ async function build() {
       ? `tmdb:${tmdbId}`
       : `tmdb:${900000000 + show.id}`;
 
-    // =========================
-    // STEP 3: GET FULL EPISODES (KEY FIX)
-    // =========================
-    const fullEpisodes = await fetchJSON(
-      `https://api.tvmaze.com/shows/${show.id}/episodes`
-    );
+    const seen = new Set();
 
-    const episodes = Array.isArray(fullEpisodes)
-      ? fullEpisodes
-      : [];
+    const videos = entry.episodes
+      // ✅ FIX 1: remove invalid episode data that breaks Stremio rendering
+      .filter(ep =>
+        ep?.season != null &&
+        ep?.number != null &&
+        ep.season > 0 &&
+        ep.number > 0
+      )
 
-    if (!episodes.length) continue;
+      // ✅ FIX 2: prevent duplicate episodes (causes truncation at ~5 items)
+      .filter(ep => {
+        const key = `${ep.season}-${ep.number}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
 
-    episodes.sort((a, b) => {
-      const at = new Date(getStrictEpisodeDate(a) || 0);
-      const bt = new Date(getStrictEpisodeDate(b) || 0);
-      return at - bt;
-    });
+      .sort((a, b) =>
+        new Date(getStrictEpisodeDate(a) || 0) -
+        new Date(getStrictEpisodeDate(b) || 0)
+      )
 
-    const videos = episodes.map(ep => ({
-      id: `${stremioId}:${ep.season || 0}:${ep.number || 0}`,
-      title: ep.name || `Episode ${ep.number || 0}`,
-      season: ep.season || 0,
-      episode: ep.number || 0,
-      released: getStrictEpisodeDate(ep),
-      overview: cleanHTML(ep.summary || "")
-    }));
+      .map(ep => ({
+        id: `${stremioId}:${ep.season}:${ep.number}`,
+        title: ep.name || `Episode ${ep.number}`,
+        season: ep.season,
+        episode: ep.number,
+        released: getStrictEpisodeDate(ep),
+        overview: cleanHTML(ep.summary || "")
+      }));
 
     metas.push({
       id: stremioId,
@@ -293,9 +272,6 @@ async function build() {
     });
   }
 
-  // =========================
-  // OUTPUT
-  // =========================
   fs.mkdirSync(CATALOG_DIR, { recursive: true });
 
   fs.writeFileSync(
