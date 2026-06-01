@@ -128,12 +128,11 @@ function isBlockedLanguage(show) {
 }
 
 // =======================
-// TMDB LOOKUP (FIXED)
+// TMDB LOOKUP (UNCHANGED)
 // =======================
 async function findTmdbId(show) {
   const imdb = show?.externals?.imdb;
 
-  // 1. IMDB → TMDB
   if (imdb) {
     const data = await fetchJSON(
       `https://api.themoviedb.org/3/find/${imdb}?api_key=${TMDB_API_KEY}&external_source=imdb_id`
@@ -143,7 +142,6 @@ async function findTmdbId(show) {
     if (id) return id;
   }
 
-  // 2. NAME SEARCH fallback
   const name = encodeURIComponent(show.name);
   const year = show?.premiered?.slice(0, 4) || "";
 
@@ -155,7 +153,6 @@ async function findTmdbId(show) {
   const id = data?.results?.[0]?.id;
   if (!id) return null;
 
-  // verify match
   const verify = await fetchJSON(
     `https://api.themoviedb.org/3/tv/${id}?api_key=${TMDB_API_KEY}`
   );
@@ -169,9 +166,6 @@ async function findTmdbId(show) {
 async function build() {
   const showMap = new Map();
 
-  // -----------------------
-  // 1. DISCOVER SHOWS
-  // -----------------------
   for (let i = 0; i < DAYS_BACK; i++) {
     const d = new Date();
     d.setDate(d.getDate() - i);
@@ -209,12 +203,8 @@ async function build() {
 
   const metas = [];
 
-  // -----------------------
-  // 2. ENRICH + EPISODES
-  // -----------------------
   for (const { show } of showMap.values()) {
     const tmdbId = await findTmdbId(show);
-
     if (!tmdbId) continue;
 
     const stremioId = `tmdb:${tmdbId}`;
@@ -239,7 +229,9 @@ async function build() {
         new Date(a.airdate || 0) - new Date(b.airdate || 0)
       )
       .map(ep => ({
-        id: `${stremioId}:${ep.season}:${ep.number}`,
+        // 🔥 FIXED: collision-proof episode IDs
+        id: `${stremioId}:S${ep.season}:E${String(ep.number).padStart(3, "0")}`,
+
         title: ep.name || `Episode ${ep.number}`,
         season: ep.season,
         episode: ep.number,
@@ -258,9 +250,6 @@ async function build() {
     });
   }
 
-  // -----------------------
-  // 3. OUTPUT
-  // -----------------------
   fs.mkdirSync(CATALOG_DIR, { recursive: true });
 
   fs.writeFileSync(
