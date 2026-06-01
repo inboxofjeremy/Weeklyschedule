@@ -1,12 +1,9 @@
-name: Build and Deploy TVMaze Catalog
+name: Build and Deploy
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
   workflow_dispatch:
-  schedule:
-    - cron: "0 8 * * *"
 
 permissions:
   contents: read
@@ -16,37 +13,27 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      - name: Install dependencies
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      
+      - name: Install
         run: npm install || true
-
-      - name: Build catalog
+      
+      - name: Build
+        env: { TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }} }
         run: node build.js
-
-      - name: Ensure manifest is in public
-        run: |
-          mkdir -p public
-          cp manifest.json public/
-
+      
       - name: Upload artifact
+        # This uploads the entire root folder of your project
         uses: actions/upload-pages-artifact@v4
         with:
-          path: public
+          path: . 
 
   deploy:
     needs: build
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-
+    environment: { name: github-pages }
     steps:
-      - name: Deploy to GitHub Pages
-        uses: actions/deploy-pages@v4
+      - uses: actions/deploy-pages@v4
