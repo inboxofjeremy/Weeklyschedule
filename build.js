@@ -2,6 +2,7 @@ import fs from "fs";
 import path from "path";
 
 // CONFIG: Everything now writes to the 'public' folder
+// Ensure these paths are exactly as shown
 const OUT_DIR = "public";
 const CATALOG_FILE = path.join(OUT_DIR, "catalog/series/tvmaze_weekly_schedule.json");
 const META_DIR = path.join(OUT_DIR, "meta/series");
