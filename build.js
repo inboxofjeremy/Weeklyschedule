@@ -3,11 +3,15 @@ import path from "path";
 
 const TMDB_API_KEY = "944017b839d3c040bdd2574083e4c1bc";
 
-const CATALOG_DIR = path.join("catalog", "series");
-const META_DIR = path.join("meta", "series");
+const OUT_DIR = "./public";
+const CATALOG_DIR = path.join(OUT_DIR, "catalog", "series");
+const META_DIR = path.join(OUT_DIR, "meta", "series");
 
 const DAYS_BACK = 10;
 
+// =====================
+// FETCH
+// =====================
 async function fetchJSON(url) {
   try {
     const res = await fetch(url);
@@ -18,12 +22,38 @@ async function fetchJSON(url) {
   }
 }
 
-const clean = s => (s ? s.replace(/<[^>]+>/g, "").trim() : "");
+// =====================
+// CLEAN
+// =====================
+const cleanHTML = s => (s ? s.replace(/<[^>]+>/g, "").trim() : "");
 
-function getDate(ep) {
-  return ep?.airdate || ep?.airstamp?.slice(0, 10) || null;
+// =====================
+// DATE
+// =====================
+function getStrictEpisodeDate(ep) {
+  return ep?.airdate && ep.airdate !== "0000-00-00"
+    ? ep.airdate
+    : ep?.airstamp?.slice(0, 10) || null;
 }
 
+// =====================
+// WINDOW FILTER
+// =====================
+function isInWindow(epDate) {
+  if (!epDate) return false;
+
+  const today = new Date();
+  const start = new Date();
+  start.setDate(today.getDate() - (DAYS_BACK - 1));
+
+  const d = new Date(epDate + "T00:00:00Z");
+
+  return d >= start && d <= today;
+}
+
+// =====================
+// TMDB LOOKUP
+// =====================
 async function findTmdbId(show) {
   const imdb = show?.externals?.imdb;
   if (!imdb) return null;
@@ -35,15 +65,18 @@ async function findTmdbId(show) {
   return data?.tv_results?.[0]?.id || null;
 }
 
+// =====================
+// MAIN
+// =====================
 async function build() {
   const showMap = new Map();
 
   const schedule = await fetchJSON(
-    `https://api.tvmaze.com/schedule?country=US&date=${new Date().toISOString().slice(0,10)}`
+    `https://api.tvmaze.com/schedule?country=US&date=${new Date().toISOString().slice(0, 10)}`
   );
 
   if (!Array.isArray(schedule)) {
-    console.log("No schedule data");
+    console.log("No schedule");
     return;
   }
 
@@ -70,20 +103,25 @@ async function build() {
       ? `tmdb:${tmdbId}`
       : `tmdb:${900000000 + show.id}`;
 
-    const videos = episodes.map(ep => ({
-      id: `${id}:${ep.season}:${ep.number}`,
-      title: ep.name,
-      season: ep.season,
-      episode: ep.number,
-      released: getDate(ep),
-      overview: clean(ep.summary)
-    }));
+    const videos = episodes
+      .filter(ep => isInWindow(getStrictEpisodeDate(ep)))
+      .map(ep => ({
+        id: `${id}:${ep.season}:${ep.number}`,
+        title: ep.name,
+        season: ep.season,
+        episode: ep.number,
+        released: getStrictEpisodeDate(ep),
+        overview: cleanHTML(ep.summary)
+      }))
+      .sort((a, b) => new Date(a.released) - new Date(b.released));
+
+    if (!videos.length) continue;
 
     const meta = {
       id,
       type: "series",
       name: show.name,
-      description: clean(show.summary),
+      description: cleanHTML(show.summary),
       poster: show.image?.original,
       background: show.image?.original,
       videos
@@ -91,7 +129,9 @@ async function build() {
 
     metas.push(meta);
 
-    // META FILE (optional but now consistent)
+    // =====================
+    // META FILE (CRITICAL)
+    // =====================
     fs.writeFileSync(
       path.join(META_DIR, `${id}.json`),
       JSON.stringify({ meta }, null, 2)
@@ -107,6 +147,6 @@ async function build() {
 }
 
 build().catch(err => {
-  console.error("BUILD FAILED:", err);
+  console.error(err);
   process.exit(1);
 });
