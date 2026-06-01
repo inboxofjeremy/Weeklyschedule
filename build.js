@@ -128,7 +128,7 @@ function isBlockedLanguage(show) {
 }
 
 // =======================
-// TMDB LOOKUP (UNCHANGED LOGIC)
+// TMDB LOOKUP (UNCHANGED)
 // =======================
 async function findTmdbId(show) {
   const imdb = show?.externals?.imdb;
@@ -218,14 +218,12 @@ async function build() {
     const videos = episodes
       .filter(ep => ep?.season != null && ep?.number != null)
       .map(ep => ({
-        // 🔥 OPTION A FIX: break TMDB reconciliation dependency
-        id: `${stremioId}-S${ep.season}-E${ep.number}-${ep.id}`,
-
+        id: `${stremioId}-S${ep.season}-E${ep.number}`,
         title: ep.name || `Episode ${ep.number}`,
         season: ep.season,
 
-        // IMPORTANT: no longer used for grouping logic
-        episode: ep.id,
+        // 🔥 CRITICAL FIX: must be sequential number (NOT ep.id)
+        episode: ep.number,
 
         released: ep.airdate || null,
         overview: cleanHTML(ep.summary || "")
