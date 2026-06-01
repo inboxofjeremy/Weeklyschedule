@@ -128,7 +128,7 @@ function isBlockedLanguage(show) {
 }
 
 // =======================
-// TMDB LOOKUP (UNCHANGED)
+// TMDB LOOKUP
 // =======================
 async function findTmdbId(show) {
   const imdb = show?.externals?.imdb;
@@ -207,8 +207,8 @@ async function build() {
     const tmdbId = await findTmdbId(show);
     if (!tmdbId) continue;
 
-    // 🔥 OPTION A FIX: stop TMDB from controlling episode authority
-    const stremioId = `tvmaze:${show.id}`;
+    // ✅ FIX: MUST remain TMDB for Stremio routing
+    const stremioId = `tmdb:${tmdbId}`;
 
     const episodes = await fetchJSON(
       `https://api.tvmaze.com/shows/${show.id}/episodes`
@@ -230,7 +230,7 @@ async function build() {
       }));
 
     metas.push({
-      id: stremioId, // 🔥 CRITICAL: TVMAZE is now authority
+      id: stremioId,
       type: "series",
       name: show.name,
       description: cleanHTML(show.summary),
