@@ -150,11 +150,10 @@ function isBlockedLanguage(show) {
 }
 
 // =======================
-// TMDB LOOKUP (UNCHANGED)
+// TMDB LOOKUP (FIXED)
 // =======================
 async function findTmdbId(show) {
   const imdb = show?.externals?.imdb || null;
-
   if (!imdb) return null;
 
   const url =
@@ -163,7 +162,15 @@ async function findTmdbId(show) {
 
   const data = await fetchJSON(url);
 
-  return data?.tv_results?.[0]?.id || null;
+  const id = data?.tv_results?.[0]?.id;
+  if (!id) return null;
+
+  // 🔥 VERIFY IT IS A REAL TV SHOW IN TMDB
+  const verify = await fetchJSON(
+    `https://api.themoviedb.org/3/tv/${id}?api_key=${TMDB_API_KEY}`
+  );
+
+  return verify?.id ? id : null;
 }
 
 // =======================
@@ -224,34 +231,30 @@ async function build() {
 
     const tmdbId = await findTmdbId(show);
 
-    const stremioId = tmdbId
-      ? `tmdb:${tmdbId}`
-      : `tmdb:${900000000 + show.id}`;
+    // ❌ FIX: no fake TMDB IDs allowed
+    if (!tmdbId) continue;
+
+    const stremioId = `tmdb:${tmdbId}`;
 
     const seen = new Set();
 
     const videos = entry.episodes
-      // ✅ FIX 1: remove invalid episode data that breaks Stremio rendering
       .filter(ep =>
         ep?.season != null &&
         ep?.number != null &&
         ep.season > 0 &&
         ep.number > 0
       )
-
-      // ✅ FIX 2: prevent duplicate episodes (causes truncation at ~5 items)
       .filter(ep => {
         const key = `${ep.season}-${ep.number}`;
         if (seen.has(key)) return false;
         seen.add(key);
         return true;
       })
-
       .sort((a, b) =>
         new Date(getStrictEpisodeDate(a) || 0) -
         new Date(getStrictEpisodeDate(b) || 0)
       )
-
       .map(ep => ({
         id: `${stremioId}:${ep.season}:${ep.number}`,
         title: ep.name || `Episode ${ep.number}`,
