@@ -16,26 +16,39 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: 20 }
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
       
-      - run: npm install || true
+      - name: Install dependencies
+        run: npm install || true
       
-      - name: Build
-        env: { TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }} }
+      - name: Build site
+        env:
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
         run: node build.js
       
       - name: Add Manifest
-        run: cp manifest.json public/
+        # Ensures manifest.json is in the root of the public/ folder for deployment
+        run: |
+          if [ -f manifest.json ]; then
+            cp manifest.json public/
+          fi
       
-      - uses: actions/upload-pages-artifact@v4
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v4
         with:
           path: public
 
   deploy:
     needs: build
     runs-on: ubuntu-latest
-    environment: { name: github-pages }
+    environment:
+      name: github-pages
     steps:
-      - uses: actions/deploy-pages@v4
+      - name: Deploy to GitHub Pages
+        uses: actions/deploy-pages@v4
