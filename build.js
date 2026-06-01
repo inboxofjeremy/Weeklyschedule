@@ -66,11 +66,11 @@ function pacificDateString(date = new Date()) {
     day: "2-digit"
   }).formatToParts(date);
 
-  const y = parts.find(p => p.type === "year").value;
-  const m = parts.find(p => p.type === "month").value;
-  const d = parts.find(p => p.type === "day").value;
-
-  return `${y}-${m}-${d}`;
+  return `${parts.find(p => p.type === "year").value}-${
+    parts.find(p => p.type === "month").value
+  }-${
+    parts.find(p => p.type === "day").value
+  }`;
 }
 
 // =======================
@@ -108,8 +108,7 @@ function isForeign(show) {
 
 function isBlockedWebChannel(show) {
   return (
-    (show?.webChannel?.name || "").toLowerCase() ===
-    "iqiyi"
+    (show?.webChannel?.name || "").toLowerCase() === "iqiyi"
   );
 }
 
@@ -122,21 +121,14 @@ function isYouTubeShow(show) {
 }
 
 function isDocumentary(show) {
-  const type = (show.type || "").toLowerCase();
-
-  const hasGenre = (show.genres || []).some(
-    g => g?.toLowerCase() === "documentary"
+  return (
+    (show.type || "").toLowerCase() === "documentary" ||
+    (show.genres || []).some(g => g?.toLowerCase() === "documentary")
   );
-
-  return type === "documentary" || hasGenre;
 }
 
 function isBlockedPlatform(show) {
-  const name = (
-    show?.webChannel?.name || ""
-  ).toLowerCase();
-
-  return name === "tubi";
+  return (show?.webChannel?.name || "").toLowerCase() === "tubi";
 }
 
 function isLegal(show) {
@@ -191,6 +183,13 @@ async function findTmdbId(show) {
 async function build() {
   const showMap = new Map();
 
+  const today = new Date();
+  const start = new Date();
+  start.setDate(today.getDate() - (DAYS_BACK - 1));
+
+  // =========================
+  // STEP 1: COLLECT SHOWS
+  // =========================
   for (let i = 0; i < DAYS_BACK; i++) {
     const d = new Date();
     d.setDate(d.getDate() - i);
@@ -208,7 +207,6 @@ async function build() {
 
       for (const ep of list) {
         const show = ep.show || ep._embedded?.show;
-
         if (!show?.id) continue;
 
         if (
@@ -225,72 +223,71 @@ async function build() {
           continue;
         }
 
+        const epDate = getStrictEpisodeDate(ep);
+        if (!epDate) continue;
+
+        const dEp = new Date(epDate + "T00:00:00Z");
+
+        // =========================
+        // WINDOW ONLY CONTROLS INCLUSION
+        // =========================
+        const inWindow = dEp >= start && dEp <= today;
+
+        if (!showMap.has(show.id) && !inWindow) continue;
+
         if (!showMap.has(show.id)) {
           showMap.set(show.id, {
             show,
-            episodes: [ep]
+            episodes: []
           });
-        } else {
-          showMap.get(show.id).episodes.push(ep);
         }
+
+        // =========================
+        // IMPORTANT: NO EPISODE FILTERING
+        // =========================
+        showMap.get(show.id).episodes.push(ep);
       }
     }
   }
 
   const metas = [];
 
+  // =========================
+  // STEP 2: BUILD OUTPUT
+  // =========================
   for (const entry of showMap.values()) {
     const show = entry.show;
 
-    // ==========================
-    // 🔥 OPTION A FIX (CRITICAL)
-    // ==========================
+    // OPTION A TMDB SAFE ID SYSTEM
     const tmdbId = await findTmdbId(show);
 
     const stremioId = tmdbId
       ? `tmdb:${tmdbId}`
-      : `tmdb:${900000000 + show.id}`; // stable synthetic fallback
+      : `tmdb:${900000000 + show.id}`;
 
-    const recent = entry.episodes;
+    const episodes = entry.episodes;
 
-    if (!recent.length) continue;
+    if (!episodes.length) continue;
 
-    recent.sort(
+    episodes.sort(
       (a, b) =>
         new Date(getStrictEpisodeDate(a)) -
         new Date(getStrictEpisodeDate(b))
     );
 
-    const videos = [];
-
-    for (const ep of recent) {
-      const overview =
-        cleanHTML(ep.summary);
-
-      videos.push({
-        id:
-          `${stremioId}:` +
-          `${ep.season || 0}:` +
-          `${ep.number || ep.id}`,
-
-        title: ep.name || `Episode ${ep.number}`,
-
-        season: ep.season || 0,
-        episode: ep.number || 0,
-
-        released: getStrictEpisodeDate(ep),
-
-        overview
-      });
-    }
+    const videos = episodes.map(ep => ({
+      id: `${stremioId}:${ep.season || 0}:${ep.number || ep.id}`,
+      title: ep.name || `Episode ${ep.number}`,
+      season: ep.season || 0,
+      episode: ep.number || 0,
+      released: getStrictEpisodeDate(ep),
+      overview: cleanHTML(ep.summary)
+    }));
 
     metas.push({
       id: stremioId,
-
       type: "series",
-
       name: show.name,
-
       description: cleanHTML(show.summary),
 
       poster:
@@ -307,24 +304,18 @@ async function build() {
 
   metas.sort(
     (a, b) =>
-      new Date(b.videos[b.videos.length - 1]?.released || 0) -
-      new Date(a.videos[a.videos.length - 1]?.released || 0)
+      new Date(b.videos.at(-1)?.released || 0) -
+      new Date(a.videos.at(-1)?.released || 0)
   );
 
-  fs.mkdirSync(CATALOG_DIR, {
-    recursive: true
-  });
+  fs.mkdirSync(CATALOG_DIR, { recursive: true });
 
   fs.writeFileSync(
     path.join(CATALOG_DIR, "tvmaze_weekly_schedule.json"),
     JSON.stringify({ metas }, null, 2)
   );
 
-  console.log(
-    "Build complete:",
-    metas.length,
-    "shows"
-  );
+  console.log("Build complete:", metas.length, "shows");
 }
 
 build().catch(err => {
