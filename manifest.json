@@ -1,29 +1,26 @@
 {
-  "id": "tvmaze.weekly.imdb",
+  "id": "com.yourname.tvmaze.catalog",
   "version": "1.0.0",
   "name": "TVMaze Weekly Schedule",
-  "description": "Recently aired TV shows from TVMaze (last 10 days), filtered and enriched with IMDb IDs",
-  "logo": "https://static.tvmaze.com/images/tvm-header-logo.png",
-  "background": "https://static.tvmaze.com/images/tvm-header-logo.png",
+
+  "description": "TVMaze-based full episode catalog",
 
   "resources": [
     "catalog",
-    "meta"
+    {
+      "name": "meta",
+      "types": ["series"],
+      "idPrefixes": ["tvmaze:"]
+    }
   ],
 
-  "types": [
-    "series"
-  ],
-
-  "idPrefixes": ["tt", "tmdb"],
+  "types": ["series"],
 
   "catalogs": [
     {
       "type": "series",
-      "id": "tvmaze_weekly_schedule",
-      "name": "TVMaze Weekly Schedule",
-      "url": "https://inboxofjeremy.github.io/Weeklyschedule/catalog/series/tvmaze_weekly_schedule.json",
-      "extra": []
+      "id": "tvmaze_weekly",
+      "name": "TVMaze Weekly"
     }
   ]
 }
