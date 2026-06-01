@@ -72,7 +72,7 @@ function pacificDateString(date = new Date()) {
 }
 
 // =======================
-// WINDOW FIX (ONLY REAL CHANGE)
+// WINDOW FIX (UNCHANGED)
 // =======================
 function isInWindow(epDate) {
   if (!epDate) return false;
@@ -150,19 +150,30 @@ function isBlockedLanguage(show) {
 }
 
 // =======================
-// TMDB LOOKUP (UNCHANGED)
+// TMDB LOOKUP (FIXED)
 // =======================
 async function findTmdbId(show) {
   const imdb = show?.externals?.imdb || null;
-  if (!imdb) return null;
 
-  const url =
-    `https://api.themoviedb.org/3/find/${imdb}` +
-    `?api_key=${TMDB_API_KEY}&external_source=imdb_id`;
+  if (imdb) {
+    const url =
+      `https://api.themoviedb.org/3/find/${imdb}` +
+      `?api_key=${TMDB_API_KEY}&external_source=imdb_id`;
 
-  const data = await fetchJSON(url);
+    const data = await fetchJSON(url);
+    const id = data?.tv_results?.[0]?.id;
+    if (id) return id;
+  }
 
-  return data?.tv_results?.[0]?.id || null;
+  // 🔥 FIX: fallback search by title (NO fake IDs anymore)
+  const searchUrl =
+    `https://api.themoviedb.org/3/search/tv` +
+    `?api_key=${TMDB_API_KEY}` +
+    `&query=${encodeURIComponent(show.name)}`;
+
+  const search = await fetchJSON(searchUrl);
+
+  return search?.results?.[0]?.id || null;
 }
 
 // =======================
@@ -204,7 +215,6 @@ async function build() {
         const epDate = getStrictEpisodeDate(ep);
         if (!epDate) continue;
 
-        // 🔥 FINAL FIX: correct window enforcement
         if (!isInWindow(epDate)) continue;
 
         if (!showMap.has(show.id)) {
@@ -230,7 +240,17 @@ async function build() {
       ? `tmdb:${tmdbId}`
       : `tmdb:${900000000 + show.id}`;
 
-    const episodes = entry.episodes;
+    // =======================
+    // 🔥 DEDUPE FIX
+    // =======================
+    const seen = new Set();
+    const episodes = entry.episodes.filter(ep => {
+      const key = `${ep.season}-${ep.number}-${ep.airdate}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+
     if (!episodes.length) continue;
 
     episodes.sort((a, b) => {
