@@ -3,14 +3,20 @@
   "version": "1.0.0",
   "name": "TVMaze Weekly Schedule",
 
-  "description": "Static TVMaze catalog (GitHub Pages)",
+  "description": "Static TVMaze catalog with self-hosted meta (GitHub Pages)",
 
   "resources": [
     "catalog",
     "meta"
   ],
 
-  "types": ["series"],
+  "types": [
+    "series"
+  ],
+
+  "idPrefixes": [
+    "tmdb:"
+  ],
 
   "catalogs": [
     {
