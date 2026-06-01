@@ -11,10 +11,9 @@ import path from "path";
 // =======================
 const TMDB_API_KEY = "944017b839d3c040bdd2574083e4c1bc";
 
-// 🔥 IMPORTANT FIX: everything must be inside public/
-const OUT_DIR = "./public";
-const CATALOG_DIR = path.join(OUT_DIR, "catalog", "series");
-const META_DIR = path.join(OUT_DIR, "meta", "series");
+// IMPORTANT: must match your workflow (NO public/)
+const CATALOG_DIR = path.join("catalog", "series");
+const META_DIR = path.join("meta", "series");
 
 const DAYS_BACK = 10;
 
@@ -286,7 +285,7 @@ async function build() {
     metas.push(meta);
 
     // =========================
-    // 🔥 META OVERRIDE (FIXED)
+    // META OUTPUT (FIXED)
     // =========================
     fs.writeFileSync(
       path.join(META_DIR, `${stremioId}.json`),
