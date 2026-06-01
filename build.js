@@ -1,6 +1,6 @@
 /**
  * build.js — Stremio static catalog & meta provider
- * GitHub Pages ONLY
+ * GitHub Pages ONLY (Colon-free ID Fix)
  */
 
 import fs from "fs";
@@ -9,8 +9,7 @@ import path from "path";
 // =======================
 // CONFIG
 // =======================
-// IMPORTANT: Use environment variables for API keys in production
-const TMDB_API_KEY = process.env.TMDB_API_KEY || "944017b839d3c040bdd2574083e4c1bc"; 
+const TMDB_API_KEY = process.env.TMDB_API_KEY; 
 const OUT_DIR = "./";
 const CATALOG_DIR = path.join(OUT_DIR, "catalog", "series");
 const META_DIR = path.join(OUT_DIR, "meta", "series");
@@ -208,10 +207,9 @@ async function build() {
   for (const entry of showMap.values()) {
     const show = entry.show;
     
-    // We fetch TMDB ID in case you need it later, but we use TVMaze ID 
-    // for Stremio to ensure Cinemeta doesn't overwrite your custom data.
+    // 🔥 FIX: Removed the colon from the ID to prevent file system and URL 404 errors
     const tmdbId = await findTmdbId(show);
-    const stremioId = `tvmaze:${show.id}`;
+    const stremioId = `tvmaze${show.id}`;
     
     const episodes = entry.episodes;
     if (!episodes.length) continue;
@@ -223,6 +221,7 @@ async function build() {
     });
 
     const videos = episodes.map(ep => ({
+      // 🔥 FIX: Colons are fine here because they map internally to episode numbers, not file names
       id: `${stremioId}:${ep.season || 0}:${ep.number || 0}`,
       title: ep.name || `Episode ${ep.number || 0}`,
       season: ep.season || 0,
@@ -244,7 +243,7 @@ async function build() {
     // Push to catalog array
     metas.push(metaObj);
 
-    // Write individual meta file for Stremio
+    // Write individual meta file for Stremio (e.g. tvmaze82565.json)
     fs.writeFileSync(
       path.join(META_DIR, `${stremioId}.json`),
       JSON.stringify({ meta: metaObj }, null, 2)
