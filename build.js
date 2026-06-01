@@ -1,16 +1,17 @@
 import fs from "fs";
 import path from "path";
 
+// ===============================
+// CONFIG
+// ===============================
 const TMDB_API_KEY = "944017b839d3c040bdd2574083e4c1bc";
-const CATALOG_DIR = path.join("./", "catalog", "series");
+const OUT_DIR = "./";
+const CATALOG_DIR = path.join(OUT_DIR, "catalog", "series");
 const DAYS_BACK = 10;
 
 const TVMAZE_DELAY_MS = 150;
 let lastTvmazeCall = 0;
 
-// ===============================
-// FETCH
-// ===============================
 async function fetchJSON(url) {
   try {
     if (url.includes("api.tvmaze.com")) {
@@ -31,7 +32,7 @@ async function fetchJSON(url) {
 }
 
 // ===============================
-// HELPERS
+// HELPERS (UNCHANGED)
 // ===============================
 const cleanHTML = s =>
   s ? s.replace(/<[^>]+>/g, "").trim() : "";
@@ -43,7 +44,7 @@ function getStrictEpisodeDate(ep) {
 }
 
 // ===============================
-// 🔥 YOUR ORIGINAL FILTERS (RESTORED STYLE)
+// FILTERS (UNCHANGED — EXACT STRUCTURE KEPT)
 // ===============================
 function isSports(show) {
   return (
@@ -109,7 +110,7 @@ function isBlockedLanguage(show) {
 }
 
 // ===============================
-// TMDB FIX (CORRECT VERSION)
+// 🔥 FIXED TMDB MAPPING (CRITICAL)
 // ===============================
 async function findTmdbId(show) {
   const imdb = show?.externals?.imdb;
@@ -130,7 +131,6 @@ async function findTmdbId(show) {
 async function build() {
   const showMap = new Map();
 
-  // STEP 1: collect
   for (let i = 0; i < DAYS_BACK; i++) {
     const d = new Date();
     d.setDate(d.getDate() - i);
@@ -172,17 +172,14 @@ async function build() {
 
   const metas = [];
 
-  // STEP 2: build output
   for (const entry of showMap.values()) {
     const show = entry.show;
 
-    // ✅ FIX: proper TMDB mapping
+    // 🔑 MUST be real TMDB ID (or skip show)
     const tmdbId = await findTmdbId(show);
+    if (!tmdbId) continue; // prevents broken click entries
 
-    // IMPORTANT: fallback to tvmaze ONLY if no tmdb
-    const stremioId = tmdbId
-      ? `tmdb:${tmdbId}`
-      : `tvmaze:${show.id}`;
+    const stremioId = `tmdb:${tmdbId}`;
 
     const episodes = entry.episodes
       .filter(ep => ep?.airdate)
