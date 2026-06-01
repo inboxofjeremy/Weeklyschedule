@@ -16,7 +16,6 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
 
@@ -31,16 +30,16 @@ jobs:
       - name: Build catalog
         env:
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }} 
-        run: node build.js
-
-      - name: Prepare folder for Pages
         run: |
           mkdir -p public/catalog/series
           mkdir -p public/meta/series
+          node build.js
+
+      - name: Finalize folder
+        run: |
           cp manifest.json public/
-          # Copying from root (where your script writes) to public/
-          cp tvmaze_weekly_schedule.json public/catalog/series/ || true
-          cp -r meta/series/* public/meta/series/ || true
+          # Ensure file exists at the path expected by the URL
+          ls -R public/
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v4
