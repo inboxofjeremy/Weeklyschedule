@@ -1,5 +1,5 @@
 /**
- * build.js — Stremio static catalog (TVMaze schedule + TMDB ID merge)
+ * build.js — Stremio static catalog (TVMaze schedule + full episode merge + TMDB ID)
  * GitHub Pages ONLY
  */
 
@@ -72,7 +72,7 @@ function pacificDateString(date = new Date()) {
 }
 
 // =======================
-// WINDOW FIX (UNCHANGED)
+// WINDOW (UNCHANGED)
 // =======================
 function isInWindow(epDate) {
   if (!epDate) return false;
@@ -150,41 +150,36 @@ function isBlockedLanguage(show) {
 }
 
 // =======================
-// 🔥 FIXED TMDB LOOKUP (REAL FIX)
+// TMDB LOOKUP (SAFE)
 // =======================
 async function findTmdbId(show) {
-  // STEP 1: enrich from full TVMaze show (CRITICAL)
-  let imdb = show?.externals?.imdb;
+  try {
+    let imdb = show?.externals?.imdb;
 
-  if (!imdb) {
-    const full = await fetchJSON(
-      `https://api.tvmaze.com/shows/${show.id}`
+    if (!imdb) {
+      const full = await fetchJSON(
+        `https://api.tvmaze.com/shows/${show.id}`
+      );
+      imdb = full?.externals?.imdb;
+    }
+
+    if (imdb) {
+      const data = await fetchJSON(
+        `https://api.themoviedb.org/3/find/${imdb}?api_key=${TMDB_API_KEY}&external_source=imdb_id`
+      );
+
+      const id = data?.tv_results?.[0]?.id;
+      if (id) return id;
+    }
+
+    const search = await fetchJSON(
+      `https://api.themoviedb.org/3/search/tv?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(show.name)}`
     );
 
-    imdb = full?.externals?.imdb;
+    return search?.results?.[0]?.id || null;
+  } catch {
+    return null;
   }
-
-  // STEP 2: IMDb lookup
-  if (imdb) {
-    const url =
-      `https://api.themoviedb.org/3/find/${imdb}` +
-      `?api_key=${TMDB_API_KEY}&external_source=imdb_id`;
-
-    const data = await fetchJSON(url);
-    const id = data?.tv_results?.[0]?.id;
-
-    if (id) return id;
-  }
-
-  // STEP 3: strict TMDB title search fallback
-  const searchUrl =
-    `https://api.themoviedb.org/3/search/tv` +
-    `?api_key=${TMDB_API_KEY}` +
-    `&query=${encodeURIComponent(show.name)}`;
-
-  const search = await fetchJSON(searchUrl);
-
-  return search?.results?.[0]?.id || null;
 }
 
 // =======================
@@ -193,6 +188,9 @@ async function findTmdbId(show) {
 async function build() {
   const showMap = new Map();
 
+  // =========================
+  // STEP 1: DISCOVER SHOWS (schedule only)
+  // =========================
   for (let i = 0; i < DAYS_BACK; i++) {
     const d = new Date();
     d.setDate(d.getDate() - i);
@@ -224,24 +222,29 @@ async function build() {
         ) continue;
 
         const epDate = getStrictEpisodeDate(ep);
-        if (!epDate) continue;
-
-        if (!isInWindow(epDate)) continue;
+        if (!epDate || !isInWindow(epDate)) continue;
 
         if (!showMap.has(show.id)) {
           showMap.set(show.id, {
             show,
-            episodes: []
+            scheduleEpisodes: new Map()
           });
         }
 
-        showMap.get(show.id).episodes.push(ep);
+        const entry = showMap.get(show.id);
+        entry.scheduleEpisodes.set(
+          `${ep.season}-${ep.number}`,
+          epDate
+        );
       }
     }
   }
 
   const metas = [];
 
+  // =========================
+  // STEP 2: ENRICH EACH SHOW
+  // =========================
   for (const entry of showMap.values()) {
     const show = entry.show;
 
@@ -251,12 +254,22 @@ async function build() {
       ? `tmdb:${tmdbId}`
       : `tmdb:${900000000 + show.id}`;
 
-    const episodes = entry.episodes;
+    // =========================
+    // STEP 3: GET FULL EPISODES (KEY FIX)
+    // =========================
+    const fullEpisodes = await fetchJSON(
+      `https://api.tvmaze.com/shows/${show.id}/episodes`
+    );
+
+    const episodes = Array.isArray(fullEpisodes)
+      ? fullEpisodes
+      : [];
+
     if (!episodes.length) continue;
 
     episodes.sort((a, b) => {
-      const at = new Date(getStrictEpisodeDate(a) || 0).getTime();
-      const bt = new Date(getStrictEpisodeDate(b) || 0).getTime();
+      const at = new Date(getStrictEpisodeDate(a) || 0);
+      const bt = new Date(getStrictEpisodeDate(b) || 0);
       return at - bt;
     });
 
@@ -274,23 +287,15 @@ async function build() {
       type: "series",
       name: show.name,
       description: cleanHTML(show.summary),
-
-      poster:
-        show.image?.original ||
-        show.image?.medium ||
-        null,
-
+      poster: show.image?.original || show.image?.medium || null,
       background: show.image?.original || null,
       videos
     });
   }
 
-  metas.sort(
-    (a, b) =>
-      new Date(b.videos.at(-1)?.released || 0) -
-      new Date(a.videos.at(-1)?.released || 0)
-  );
-
+  // =========================
+  // OUTPUT
+  // =========================
   fs.mkdirSync(CATALOG_DIR, { recursive: true });
 
   fs.writeFileSync(
