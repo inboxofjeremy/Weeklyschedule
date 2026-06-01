@@ -1,10 +1,7 @@
 import fs from "fs";
 import path from "path";
 
-const BASE = "./";
-const CATALOG_DIR = path.join(BASE, "catalog", "series");
-const META_DIR = path.join(BASE, "meta", "series");
-
+const OUT_FILE = path.join("catalog", "series", "tvmaze_weekly_schedule.json");
 const DAYS_BACK = 10;
 
 async function fetchJSON(url) {
@@ -22,9 +19,6 @@ const clean = s => (s ? s.replace(/<[^>]+>/g, "").trim() : "");
 async function build() {
   const showMap = new Map();
 
-  // =========================
-  // COLLECT SHOWS
-  // =========================
   for (let i = 0; i < DAYS_BACK; i++) {
     const d = new Date();
     d.setDate(d.getDate() - i);
@@ -52,19 +46,14 @@ async function build() {
     }
   }
 
-  fs.mkdirSync(CATALOG_DIR, { recursive: true });
-  fs.mkdirSync(META_DIR, { recursive: true });
-
   const metas = [];
 
-  // =========================
-  // BUILD META FILES
-  // =========================
   for (const { show, episodes } of showMap.values()) {
     const id = `tvmaze:${show.id}`;
 
-    const videos = [];
     const seen = new Set();
+
+    const videos = [];
 
     for (const ep of episodes) {
       const key = `${ep.season}-${ep.number}`;
@@ -81,38 +70,22 @@ async function build() {
       });
     }
 
-    const metaObj = {
-      meta: {
-        id,
-        type: "series",
-        name: show.name,
-        description: clean(show.summary),
-
-        poster: show.image?.original || show.image?.medium || null,
-        background: show.image?.original || null,
-
-        videos
-      }
-    };
-
-    // WRITE META FILE
-    fs.writeFileSync(
-      path.join(META_DIR, `${id}.json`),
-      JSON.stringify(metaObj, null, 2)
-    );
-
-    metas.push(metaObj.meta);
+    metas.push({
+      id,
+      type: "series",
+      name: show.name,
+      description: clean(show.summary),
+      poster: show.image?.original || show.image?.medium || null,
+      background: show.image?.original || null,
+      videos
+    });
   }
 
-  // =========================
-  // WRITE CATALOG
-  // =========================
-  fs.writeFileSync(
-    path.join(CATALOG_DIR, "tvmaze_weekly_schedule.json"),
-    JSON.stringify({ metas }, null, 2)
-  );
+  fs.mkdirSync(path.dirname(OUT_FILE), { recursive: true });
 
-  console.log("Built catalog + meta files:", metas.length);
+  fs.writeFileSync(OUT_FILE, JSON.stringify({ metas }, null, 2));
+
+  console.log("Built:", metas.length);
 }
 
 build();
