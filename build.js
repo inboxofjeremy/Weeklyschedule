@@ -3,7 +3,6 @@ import path from "path";
 
 const OUT_DIR = "./";
 const CATALOG_DIR = path.join(OUT_DIR, "catalog", "series");
-
 const DAYS_BACK = 10;
 
 async function fetchJSON(url) {
@@ -19,7 +18,7 @@ async function fetchJSON(url) {
 const clean = s => (s ? s.replace(/<[^>]+>/g, "").trim() : "");
 
 // =======================
-// BUILD
+// MAIN BUILD
 // =======================
 async function build() {
   const showMap = new Map();
@@ -27,6 +26,7 @@ async function build() {
   for (let i = 0; i < DAYS_BACK; i++) {
     const d = new Date();
     d.setDate(d.getDate() - i);
+
     const date = d.toISOString().slice(0, 10);
 
     const schedule = await fetchJSON(
@@ -55,29 +55,28 @@ async function build() {
   for (const { show, episodes } of showMap.values()) {
     if (!episodes.length) continue;
 
-    // =========================================
-    // 🔥 CRITICAL FIX: TVMAZE ONLY ID SYSTEM
-    // =========================================
+    // 🔥 TVMAZE IS THE ONLY ID SYSTEM
     const id = `tvmaze:${show.id}`;
-
-    const videos = [];
 
     const seen = new Set();
 
-    for (const ep of episodes) {
-      const key = `${ep.season}-${ep.number}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
+    const videos = episodes
+      .filter(ep => ep?.season != null && ep?.number != null)
+      .map(ep => {
+        const key = `${ep.season}-${ep.number}`;
+        if (seen.has(key)) return null;
+        seen.add(key);
 
-      videos.push({
-        id: `${id}:${ep.season}:${ep.number}`,
-        title: ep.name || `Episode ${ep.number}`,
-        season: ep.season,
-        episode: ep.number,
-        released: ep.airdate,
-        overview: clean(ep.summary || "")
-      });
-    }
+        return {
+          id: `${id}:${ep.season}:${ep.number}`,
+          title: ep.name || `Episode ${ep.number}`,
+          season: ep.season,
+          episode: ep.number,
+          released: ep.airdate,
+          overview: clean(ep.summary || "")
+        };
+      })
+      .filter(Boolean);
 
     metas.push({
       id,
