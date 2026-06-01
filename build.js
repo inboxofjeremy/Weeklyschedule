@@ -66,7 +66,7 @@ function pacificDateString(date = new Date()) {
 }
 
 // =======================
-// FILTERS (UNCHANGED BEHAVIOR)
+// FILTERS (UNCHANGED)
 // =======================
 function isSports(show) {
   return (
@@ -80,6 +80,7 @@ function isNews(show) {
   const isPanel = (show.genres || []).some(g =>
     ["panel", "quiz", "game show"].includes(g?.toLowerCase())
   );
+
   return !(isPanel) && (t === "news" || t === "talk show");
 }
 
@@ -89,6 +90,7 @@ function isForeign(show) {
     show?.network?.country?.code ||
     show?.webChannel?.country?.code ||
     "";
+
   return c && !allowed.includes(c.toUpperCase());
 }
 
@@ -126,18 +128,39 @@ function isBlockedLanguage(show) {
 }
 
 // =======================
-// TMDB LOOKUP (SAFE, NON-BLOCKING)
+// TMDB LOOKUP (FIXED)
 // =======================
 async function findTmdbId(show) {
   const imdb = show?.externals?.imdb;
 
-  if (!imdb) return null;
+  // 1. IMDB → TMDB
+  if (imdb) {
+    const data = await fetchJSON(
+      `https://api.themoviedb.org/3/find/${imdb}?api_key=${TMDB_API_KEY}&external_source=imdb_id`
+    );
+
+    const id = data?.tv_results?.[0]?.id;
+    if (id) return id;
+  }
+
+  // 2. NAME SEARCH fallback
+  const name = encodeURIComponent(show.name);
+  const year = show?.premiered?.slice(0, 4) || "";
 
   const data = await fetchJSON(
-    `https://api.themoviedb.org/3/find/${imdb}?api_key=${TMDB_API_KEY}&external_source=imdb_id`
+    `https://api.themoviedb.org/3/search/tv?api_key=${TMDB_API_KEY}&query=${name}` +
+    (year ? `&first_air_date_year=${year}` : "")
   );
 
-  return data?.tv_results?.[0]?.id || null;
+  const id = data?.results?.[0]?.id;
+  if (!id) return null;
+
+  // verify match
+  const verify = await fetchJSON(
+    `https://api.themoviedb.org/3/tv/${id}?api_key=${TMDB_API_KEY}`
+  );
+
+  return verify?.id ? id : null;
 }
 
 // =======================
@@ -147,7 +170,7 @@ async function build() {
   const showMap = new Map();
 
   // -----------------------
-  // 1. DISCOVER SHOWS (schedule only)
+  // 1. DISCOVER SHOWS
   // -----------------------
   for (let i = 0; i < DAYS_BACK; i++) {
     const d = new Date();
@@ -167,7 +190,6 @@ async function build() {
         const show = ep.show || ep._embedded?.show;
         if (!show?.id) continue;
 
-        // filters still apply here
         if (
           isSports(show) ||
           isForeign(show) ||
@@ -188,22 +210,15 @@ async function build() {
   const metas = [];
 
   // -----------------------
-  // 2. ENRICH SHOWS
+  // 2. ENRICH + EPISODES
   // -----------------------
   for (const { show } of showMap.values()) {
     const tmdbId = await findTmdbId(show);
 
-    // NEVER DROP SHOWS
-    const stremioId =
-      tmdbId
-        ? `tmdb:${tmdbId}`
-        : show.externals?.imdb
-          ? `tt${show.externals.imdb.replace("tt", "")}`
-          : `tvmaze:${show.id}`;
+    if (!tmdbId) continue;
 
-    // -----------------------
-    // 3. EPISODES (ONLY SOURCE OF TRUTH)
-    // -----------------------
+    const stremioId = `tmdb:${tmdbId}`;
+
     const episodes = await fetchJSON(
       `https://api.tvmaze.com/shows/${show.id}/episodes`
     );
@@ -244,7 +259,7 @@ async function build() {
   }
 
   // -----------------------
-  // 4. WRITE OUTPUT
+  // 3. OUTPUT
   // -----------------------
   fs.mkdirSync(CATALOG_DIR, { recursive: true });
 
