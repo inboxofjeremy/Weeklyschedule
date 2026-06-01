@@ -207,7 +207,8 @@ async function build() {
     const tmdbId = await findTmdbId(show);
     if (!tmdbId) continue;
 
-    const stremioId = `tmdb:${tmdbId}`;
+    // 🔥 OPTION A FIX: stop TMDB from controlling episode authority
+    const stremioId = `tvmaze:${show.id}`;
 
     const episodes = await fetchJSON(
       `https://api.tvmaze.com/shows/${show.id}/episodes`
@@ -219,21 +220,17 @@ async function build() {
       .filter(ep => ep?.season != null && ep?.number != null)
       .map(ep => ({
         id: `${stremioId}-S${ep.season}-E${ep.number}`,
+
         title: ep.name || `Episode ${ep.number}`,
         season: ep.season,
-
-        // 🔥 CRITICAL FIX: must be sequential number (NOT ep.id)
         episode: ep.number,
 
         released: ep.airdate || null,
         overview: cleanHTML(ep.summary || "")
-      }))
-      .sort((a, b) =>
-        new Date(a.released || 0) - new Date(b.released || 0)
-      );
+      }));
 
     metas.push({
-      id: stremioId,
+      id: stremioId, // 🔥 CRITICAL: TVMAZE is now authority
       type: "series",
       name: show.name,
       description: cleanHTML(show.summary),
