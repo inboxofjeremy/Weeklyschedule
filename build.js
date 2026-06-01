@@ -1,8 +1,7 @@
 import fs from "fs";
 import path from "path";
 
-const OUT_DIR = "./public";
-const CATALOG_DIR = path.join(OUT_DIR, "catalog", "series");
+const CATALOG_DIR = path.join("catalog", "series");
 const DAYS_BACK = 10;
 
 async function fetchJSON(url) {
@@ -54,43 +53,43 @@ async function build() {
 
     const seen = new Set();
 
-    const videos = episodes
-      .filter(ep => ep?.season != null && ep?.number != null)
-      .map(ep => {
-        const key = `${ep.season}-${ep.number}`;
-        if (seen.has(key)) return null;
-        seen.add(key);
+    const videos = [];
 
-        return {
-          id: `${id}:${ep.season}:${ep.number}`,
-          title: ep.name || `Episode ${ep.number}`,
-          season: ep.season,
-          episode: ep.number,
-          released: ep.airdate,
-          overview: clean(ep.summary || "")
-        };
-      })
-      .filter(Boolean);
+    for (const ep of episodes) {
+      const key = `${ep.season}-${ep.number}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      videos.push({
+        id: `${id}:${ep.season}:${ep.number}`,
+        title: ep.name || `Episode ${ep.number}`,
+        season: ep.season,
+        episode: ep.number,
+        released: ep.airdate,
+        overview: clean(ep.summary || "")
+      });
+    }
 
     metas.push({
       id,
       type: "series",
       name: show.name,
       description: clean(show.summary),
+
       poster: show.image?.original || show.image?.medium || null,
       background: show.image?.original || null,
+
       videos
     });
   }
 
   fs.mkdirSync(CATALOG_DIR, { recursive: true });
 
-  fs.writeFileSync(
-    path.join(CATALOG_DIR, "tvmaze_weekly_schedule.json"),
-    JSON.stringify({ metas }, null, 2)
-  );
+  const outFile = path.join(CATALOG_DIR, "tvmaze_weekly_schedule.json");
 
-  console.log("Build complete:", metas.length);
+  fs.writeFileSync(outFile, JSON.stringify({ metas }, null, 2));
+
+  console.log("Built:", metas.length, "shows");
 }
 
 build();
