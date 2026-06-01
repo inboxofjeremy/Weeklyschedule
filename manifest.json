@@ -4,13 +4,13 @@
   "name": "TVMaze Weekly Schedule",
   "description": "Self-hosted TVMaze catalog with full metadata override",
   "types": ["series"],
-  "idPrefixes": ["tvmaze:"],
+  "idPrefixes": ["tvmaze"],
   "resources": [
     "catalog",
     {
       "name": "meta",
       "types": ["series"],
-      "idPrefixes": ["tvmaze:"]
+      "idPrefixes": ["tvmaze"]
     }
   ],
   "catalogs": [
