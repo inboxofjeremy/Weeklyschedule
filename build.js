@@ -75,21 +75,20 @@ async function build() {
       type: "series",
       name: show.name,
       description: clean(show.summary),
-
       poster: show.image?.original || show.image?.medium || null,
       background: show.image?.original || null,
-
       videos
     });
   }
 
   fs.mkdirSync(CATALOG_DIR, { recursive: true });
 
-  const outFile = path.join(CATALOG_DIR, "tvmaze_weekly_schedule.json");
+  fs.writeFileSync(
+    path.join(CATALOG_DIR, "tvmaze_weekly_schedule.json"),
+    JSON.stringify({ metas }, null, 2)
+  );
 
-  fs.writeFileSync(outFile, JSON.stringify({ metas }, null, 2));
-
-  console.log("Built:", metas.length, "shows");
+  console.log("Built:", metas.length);
 }
 
 build();
