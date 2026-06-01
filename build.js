@@ -3,15 +3,10 @@ import path from "path";
 
 const TMDB_API_KEY = "944017b839d3c040bdd2574083e4c1bc";
 
-// 🔥 MUST match GitHub Pages deploy root
-const OUT_DIR = "./public";
-
-const CATALOG_DIR = path.join(OUT_DIR, "catalog", "series");
-const META_DIR = path.join(OUT_DIR, "meta", "series");
+const CATALOG_DIR = path.join("catalog", "series");
+const META_DIR = path.join("meta", "series");
 
 const DAYS_BACK = 10;
-
-// -----------------------
 
 async function fetchJSON(url) {
   try {
@@ -23,13 +18,11 @@ async function fetchJSON(url) {
   }
 }
 
-const cleanHTML = s => (s ? s.replace(/<[^>]+>/g, "").trim() : "");
+const clean = s => (s ? s.replace(/<[^>]+>/g, "").trim() : "");
 
 function getDate(ep) {
   return ep?.airdate || ep?.airstamp?.slice(0, 10) || null;
 }
-
-// -----------------------
 
 async function findTmdbId(show) {
   const imdb = show?.externals?.imdb;
@@ -42,18 +35,17 @@ async function findTmdbId(show) {
   return data?.tv_results?.[0]?.id || null;
 }
 
-// -----------------------
-
 async function build() {
   const showMap = new Map();
 
-  const today = new Date().toISOString().slice(0, 10);
-
   const schedule = await fetchJSON(
-    `https://api.tvmaze.com/schedule?country=US&date=${today}`
+    `https://api.tvmaze.com/schedule?country=US&date=${new Date().toISOString().slice(0,10)}`
   );
 
-  if (!Array.isArray(schedule)) return;
+  if (!Array.isArray(schedule)) {
+    console.log("No schedule data");
+    return;
+  }
 
   for (const ep of schedule) {
     const show = ep.show;
@@ -84,14 +76,14 @@ async function build() {
       season: ep.season,
       episode: ep.number,
       released: getDate(ep),
-      overview: cleanHTML(ep.summary)
+      overview: clean(ep.summary)
     }));
 
     const meta = {
       id,
       type: "series",
       name: show.name,
-      description: cleanHTML(show.summary),
+      description: clean(show.summary),
       poster: show.image?.original,
       background: show.image?.original,
       videos
@@ -99,7 +91,7 @@ async function build() {
 
     metas.push(meta);
 
-    // 🔥 WRITE META (THIS IS WHAT YOU ARE MISSING)
+    // META FILE (optional but now consistent)
     fs.writeFileSync(
       path.join(META_DIR, `${id}.json`),
       JSON.stringify({ meta }, null, 2)
@@ -111,7 +103,10 @@ async function build() {
     JSON.stringify({ metas }, null, 2)
   );
 
-  console.log("Built:", metas.length);
+  console.log("Build complete:", metas.length);
 }
 
-build();
+build().catch(err => {
+  console.error("BUILD FAILED:", err);
+  process.exit(1);
+});
