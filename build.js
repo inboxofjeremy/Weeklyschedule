@@ -1,14 +1,22 @@
+/**
+ * build.js — Stremio static catalog (TVMaze schedule + TMDB ID merge)
+ * GitHub Pages ONLY
+ */
+
 import fs from "fs";
 import path from "path";
 
-// ===============================
+// =======================
 // CONFIG
-// ===============================
+// =======================
 const TMDB_API_KEY = "944017b839d3c040bdd2574083e4c1bc";
 const OUT_DIR = "./";
 const CATALOG_DIR = path.join(OUT_DIR, "catalog", "series");
 const DAYS_BACK = 10;
 
+// =======================
+// TVMAZE RATE LIMIT
+// =======================
 const TVMAZE_DELAY_MS = 150;
 let lastTvmazeCall = 0;
 
@@ -19,21 +27,28 @@ async function fetchJSON(url) {
         0,
         TVMAZE_DELAY_MS - (Date.now() - lastTvmazeCall)
       );
-      if (wait) await new Promise(r => setTimeout(r));
+
+      if (wait) {
+        await new Promise(r => setTimeout(r));
+      }
+
       lastTvmazeCall = Date.now();
     }
 
     const res = await fetch(url);
+
     if (!res.ok) return null;
+
     return await res.json();
+
   } catch {
     return null;
   }
 }
 
-// ===============================
-// HELPERS (UNCHANGED)
-// ===============================
+// =======================
+// HELPERS
+// =======================
 const cleanHTML = s =>
   s ? s.replace(/<[^>]+>/g, "").trim() : "";
 
@@ -43,9 +58,24 @@ function getStrictEpisodeDate(ep) {
     : ep?.airstamp?.slice(0, 10) || null;
 }
 
-// ===============================
-// FILTERS (UNCHANGED — EXACT STRUCTURE KEPT)
-// ===============================
+function pacificDateString(date = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Los_Angeles",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).formatToParts(date);
+
+  const y = parts.find(p => p.type === "year").value;
+  const m = parts.find(p => p.type === "month").value;
+  const d = parts.find(p => p.type === "day").value;
+
+  return `${y}-${m}-${d}`;
+}
+
+// =======================
+// FILTERS (UNCHANGED)
+// =======================
 function isSports(show) {
   return (
     (show.type || "").toLowerCase() === "sports" ||
@@ -77,43 +107,73 @@ function isForeign(show) {
 }
 
 function isBlockedWebChannel(show) {
-  return (show?.webChannel?.name || "").toLowerCase() === "iqiyi";
-}
-
-function isYouTubeShow(show) {
-  return (show?.webChannel?.name || "").toLowerCase().includes("youtube");
-}
-
-function isDocumentary(show) {
   return (
-    (show.type || "").toLowerCase() === "documentary" ||
-    (show.genres || []).some(g => g?.toLowerCase() === "documentary")
+    (show?.webChannel?.name || "").toLowerCase() ===
+    "iqiyi"
   );
 }
 
+function isYouTubeShow(show) {
+  return (
+    (show?.webChannel?.name || "")
+      .toLowerCase()
+      .includes("youtube")
+  );
+}
+
+function isDocumentary(show) {
+  const type = (show.type || "").toLowerCase();
+
+  const hasGenre = (show.genres || []).some(
+    g => g?.toLowerCase() === "documentary"
+  );
+
+  return type === "documentary" || hasGenre;
+}
+
 function isBlockedPlatform(show) {
-  return (show?.webChannel?.name || "").toLowerCase() === "tubi";
+  const name = (
+    show?.webChannel?.name || ""
+  ).toLowerCase();
+
+  return name === "tubi";
 }
 
 function isLegal(show) {
-  return (show.genres || []).some(g => g?.toLowerCase() === "legal");
+  return (show.genres || []).some(
+    g => g?.toLowerCase() === "legal"
+  );
 }
 
 function isBlockedLanguage(show) {
   const blocked = [
-    "italian","turkish","indonesian","spanish","thai",
-    "arabic","norwegian","german","chinese","korean",
-    "french","hindi"
+    "italian",
+    "turkish",
+    "indonesian",
+    "spanish",
+    "thai",
+    "arabic",
+    "norwegian",
+    "german",
+    "chinese",
+    "korean",
+    "french",
+    "hindi"
   ];
 
-  return blocked.includes((show.language || "").toLowerCase());
+  const lang = String(show?.language || "")
+    .trim()
+    .toLowerCase();
+
+  return blocked.includes(lang);
 }
 
-// ===============================
-// 🔥 FIXED TMDB MAPPING (CRITICAL)
-// ===============================
+// =======================
+// TMDB LOOKUP (UNCHANGED)
+// =======================
 async function findTmdbId(show) {
-  const imdb = show?.externals?.imdb;
+  const imdb = show?.externals?.imdb || null;
+
   if (!imdb) return null;
 
   const url =
@@ -125,9 +185,9 @@ async function findTmdbId(show) {
   return data?.tv_results?.[0]?.id || null;
 }
 
-// ===============================
-// MAIN
-// ===============================
+// =======================
+// MAIN BUILD
+// =======================
 async function build() {
   const showMap = new Map();
 
@@ -135,37 +195,44 @@ async function build() {
     const d = new Date();
     d.setDate(d.getDate() - i);
 
-    const dateStr = d.toISOString().slice(0, 10);
+    const dateStr = pacificDateString(d);
 
-    const list = await fetchJSON(
-      `https://api.tvmaze.com/schedule?country=US&date=${dateStr}`
-    );
+    for (const url of [
+      `https://api.tvmaze.com/schedule?country=US&date=${dateStr}`,
+      `https://api.tvmaze.com/schedule/web?date=${dateStr}`,
+      `https://api.tvmaze.com/schedule/full?date=${dateStr}`
+    ]) {
+      const list = await fetchJSON(url);
 
-    if (!Array.isArray(list)) continue;
+      if (!Array.isArray(list)) continue;
 
-    for (const ep of list) {
-      const show = ep.show;
-      if (!show?.id) continue;
+      for (const ep of list) {
+        const show = ep.show || ep._embedded?.show;
 
-      if (
-        isSports(show) ||
-        isNews(show) ||
-        isForeign(show) ||
-        isBlockedLanguage(show) ||
-        isDocumentary(show) ||
-        isBlockedWebChannel(show) ||
-        isYouTubeShow(show) ||
-        isLegal(show) ||
-        isBlockedPlatform(show)
-      ) continue;
+        if (!show?.id) continue;
 
-      if (!showMap.has(show.id)) {
-        showMap.set(show.id, {
-          show,
-          episodes: [ep]
-        });
-      } else {
-        showMap.get(show.id).episodes.push(ep);
+        if (
+          isSports(show) ||
+          isForeign(show) ||
+          isBlockedLanguage(show) ||
+          isDocumentary(show) ||
+          isBlockedWebChannel(show) ||
+          isYouTubeShow(show) ||
+          isLegal(show) ||
+          isBlockedPlatform(show) ||
+          isNews(show)
+        ) {
+          continue;
+        }
+
+        if (!showMap.has(show.id)) {
+          showMap.set(show.id, {
+            show,
+            episodes: [ep]
+          });
+        } else {
+          showMap.get(show.id).episodes.push(ep);
+        }
       }
     }
   }
@@ -175,32 +242,55 @@ async function build() {
   for (const entry of showMap.values()) {
     const show = entry.show;
 
-    // 🔑 MUST be real TMDB ID (or skip show)
+    // ==========================
+    // 🔥 OPTION A FIX (CRITICAL)
+    // ==========================
     const tmdbId = await findTmdbId(show);
-    if (!tmdbId) continue; // prevents broken click entries
 
-    const stremioId = `tmdb:${tmdbId}`;
+    const stremioId = tmdbId
+      ? `tmdb:${tmdbId}`
+      : `tmdb:${900000000 + show.id}`; // stable synthetic fallback
 
-    const episodes = entry.episodes
-      .filter(ep => ep?.airdate)
-      .sort((a, b) =>
+    const recent = entry.episodes;
+
+    if (!recent.length) continue;
+
+    recent.sort(
+      (a, b) =>
         new Date(getStrictEpisodeDate(a)) -
         new Date(getStrictEpisodeDate(b))
-      );
+    );
 
-    const videos = episodes.map(ep => ({
-      id: `${stremioId}:${ep.season}:${ep.number}`,
-      title: ep.name || `Episode ${ep.number}`,
-      season: ep.season || 0,
-      episode: ep.number || 0,
-      released: getStrictEpisodeDate(ep),
-      overview: cleanHTML(ep.summary)
-    }));
+    const videos = [];
+
+    for (const ep of recent) {
+      const overview =
+        cleanHTML(ep.summary);
+
+      videos.push({
+        id:
+          `${stremioId}:` +
+          `${ep.season || 0}:` +
+          `${ep.number || ep.id}`,
+
+        title: ep.name || `Episode ${ep.number}`,
+
+        season: ep.season || 0,
+        episode: ep.number || 0,
+
+        released: getStrictEpisodeDate(ep),
+
+        overview
+      });
+    }
 
     metas.push({
       id: stremioId,
+
       type: "series",
+
       name: show.name,
+
       description: cleanHTML(show.summary),
 
       poster:
@@ -215,19 +305,26 @@ async function build() {
     });
   }
 
-  metas.sort((a, b) =>
-    new Date(b.videos.at(-1)?.released || 0) -
-    new Date(a.videos.at(-1)?.released || 0)
+  metas.sort(
+    (a, b) =>
+      new Date(b.videos[b.videos.length - 1]?.released || 0) -
+      new Date(a.videos[a.videos.length - 1]?.released || 0)
   );
 
-  fs.mkdirSync(CATALOG_DIR, { recursive: true });
+  fs.mkdirSync(CATALOG_DIR, {
+    recursive: true
+  });
 
   fs.writeFileSync(
     path.join(CATALOG_DIR, "tvmaze_weekly_schedule.json"),
     JSON.stringify({ metas }, null, 2)
   );
 
-  console.log("Build complete:", metas.length, "shows");
+  console.log(
+    "Build complete:",
+    metas.length,
+    "shows"
+  );
 }
 
 build().catch(err => {
