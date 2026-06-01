@@ -10,9 +10,12 @@ import path from "path";
 // CONFIG
 // =======================
 const TMDB_API_KEY = "944017b839d3c040bdd2574083e4c1bc";
-const OUT_DIR = "./";
+
+// 🔥 IMPORTANT FIX: everything must be inside public/
+const OUT_DIR = "./public";
 const CATALOG_DIR = path.join(OUT_DIR, "catalog", "series");
 const META_DIR = path.join(OUT_DIR, "meta", "series");
+
 const DAYS_BACK = 10;
 
 // =======================
@@ -46,7 +49,7 @@ async function fetchJSON(url) {
 }
 
 // =======================
-// HELPERS
+// HELPERS (UNCHANGED)
 // =======================
 const cleanHTML = s =>
   s ? s.replace(/<[^>]+>/g, "").trim() : "";
@@ -73,7 +76,7 @@ function pacificDateString(date = new Date()) {
 }
 
 // =======================
-// WINDOW FIX
+// WINDOW FIX (UNCHANGED)
 // =======================
 function isInWindow(epDate) {
   if (!epDate) return false;
@@ -283,7 +286,7 @@ async function build() {
     metas.push(meta);
 
     // =========================
-    // 🔥 CRITICAL FIX: META OVERRIDE FILE
+    // 🔥 META OVERRIDE (FIXED)
     // =========================
     fs.writeFileSync(
       path.join(META_DIR, `${stremioId}.json`),
