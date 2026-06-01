@@ -29,7 +29,7 @@ async function fetchJSON(url) {
       );
 
       if (wait) {
-        await new Promise(r => setTimeout(r));
+        await new Promise(r => setTimeout(r, wait));
       }
 
       lastTvmazeCall = Date.now();
@@ -66,22 +66,7 @@ function pacificDateString(date = new Date()) {
 }
 
 // =======================
-// WINDOW (UNCHANGED)
-// =======================
-function isInWindow(epDate) {
-  if (!epDate) return false;
-
-  const today = new Date();
-  const start = new Date();
-  start.setDate(today.getDate() - (DAYS_BACK - 1));
-
-  const d = new Date(epDate + "T00:00:00Z");
-
-  return d >= start && d <= today;
-}
-
-// =======================
-// FILTERS (UNCHANGED)
+// FILTERS (UNCHANGED BEHAVIOR)
 // =======================
 function isSports(show) {
   return (
@@ -95,9 +80,7 @@ function isNews(show) {
   const isPanel = (show.genres || []).some(g =>
     ["panel", "quiz", "game show"].includes(g?.toLowerCase())
   );
-
-  if (isPanel) return false;
-  return t === "news" || t === "talk show";
+  return !(isPanel) && (t === "news" || t === "talk show");
 }
 
 function isForeign(show) {
@@ -106,7 +89,6 @@ function isForeign(show) {
     show?.network?.country?.code ||
     show?.webChannel?.country?.code ||
     "";
-
   return c && !allowed.includes(c.toUpperCase());
 }
 
@@ -144,27 +126,18 @@ function isBlockedLanguage(show) {
 }
 
 // =======================
-// TMDB LOOKUP (UNCHANGED BUT SAFE)
+// TMDB LOOKUP (SAFE, NON-BLOCKING)
 // =======================
 async function findTmdbId(show) {
   const imdb = show?.externals?.imdb;
 
   if (!imdb) return null;
 
-  const url =
-    `https://api.themoviedb.org/3/find/${imdb}` +
-    `?api_key=${TMDB_API_KEY}&external_source=imdb_id`;
-
-  const data = await fetchJSON(url);
-
-  const id = data?.tv_results?.[0]?.id;
-  if (!id) return null;
-
-  const verify = await fetchJSON(
-    `https://api.themoviedb.org/3/tv/${id}?api_key=${TMDB_API_KEY}`
+  const data = await fetchJSON(
+    `https://api.themoviedb.org/3/find/${imdb}?api_key=${TMDB_API_KEY}&external_source=imdb_id`
   );
 
-  return verify?.id ? id : null;
+  return data?.tv_results?.[0]?.id || null;
 }
 
 // =======================
@@ -173,7 +146,9 @@ async function findTmdbId(show) {
 async function build() {
   const showMap = new Map();
 
-  // STEP 1: DISCOVER SHOWS FROM SCHEDULE ONLY
+  // -----------------------
+  // 1. DISCOVER SHOWS (schedule only)
+  // -----------------------
   for (let i = 0; i < DAYS_BACK; i++) {
     const d = new Date();
     d.setDate(d.getDate() - i);
@@ -192,6 +167,7 @@ async function build() {
         const show = ep.show || ep._embedded?.show;
         if (!show?.id) continue;
 
+        // filters still apply here
         if (
           isSports(show) ||
           isForeign(show) ||
@@ -204,27 +180,30 @@ async function build() {
           isNews(show)
         ) continue;
 
-        if (!showMap.has(show.id)) {
-          showMap.set(show.id, {
-            show
-          });
-        }
+        showMap.set(show.id, { show });
       }
     }
   }
 
   const metas = [];
 
-  // STEP 2: ENRICH EACH SHOW WITH FULL EPISODES
-  for (const entry of showMap.values()) {
-    const show = entry.show;
-
+  // -----------------------
+  // 2. ENRICH SHOWS
+  // -----------------------
+  for (const { show } of showMap.values()) {
     const tmdbId = await findTmdbId(show);
-    if (!tmdbId) continue;
 
-    const stremioId = `tmdb:${tmdbId}`;
+    // NEVER DROP SHOWS
+    const stremioId =
+      tmdbId
+        ? `tmdb:${tmdbId}`
+        : show.externals?.imdb
+          ? `tt${show.externals.imdb.replace("tt", "")}`
+          : `tvmaze:${show.id}`;
 
-    // 🔥 ONLY SOURCE OF TRUTH FOR EPISODES
+    // -----------------------
+    // 3. EPISODES (ONLY SOURCE OF TRUTH)
+    // -----------------------
     const episodes = await fetchJSON(
       `https://api.tvmaze.com/shows/${show.id}/episodes`
     );
@@ -242,7 +221,7 @@ async function build() {
         return true;
       })
       .sort((a, b) =>
-        new Date((a.airdate || 0)) - new Date((b.airdate || 0))
+        new Date(a.airdate || 0) - new Date(b.airdate || 0)
       )
       .map(ep => ({
         id: `${stremioId}:${ep.season}:${ep.number}`,
@@ -264,6 +243,9 @@ async function build() {
     });
   }
 
+  // -----------------------
+  // 4. WRITE OUTPUT
+  // -----------------------
   fs.mkdirSync(CATALOG_DIR, { recursive: true });
 
   fs.writeFileSync(
