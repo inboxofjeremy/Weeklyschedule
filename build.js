@@ -12,7 +12,6 @@ import path from "path";
 const TMDB_API_KEY = "944017b839d3c040bdd2574083e4c1bc";
 const OUT_DIR = "./";
 const CATALOG_DIR = path.join(OUT_DIR, "catalog", "series");
-const META_DIR = path.join(OUT_DIR, "meta", "series");
 const DAYS_BACK = 10;
 
 // =======================
@@ -51,12 +50,7 @@ async function fetchJSON(url) {
 const cleanHTML = s =>
   s ? s.replace(/<[^>]+>/g, "").trim() : "";
 
-function getStrictEpisodeDate(ep) {
-  return ep?.airdate && ep.airdate !== "0000-00-00"
-    ? ep.airdate
-    : ep?.airstamp?.slice(0, 10) || null;
-}
-
+// Always treat dates as Pacific-day strings
 function pacificDateString(date = new Date()) {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "America/Los_Angeles",
@@ -72,19 +66,30 @@ function pacificDateString(date = new Date()) {
   }`;
 }
 
+function getStrictEpisodeDate(ep) {
+  const raw =
+    ep?.airdate && ep.airdate !== "0000-00-00"
+      ? ep.airdate
+      : ep?.airstamp?.slice(0, 10) || null;
+
+  return raw;
+}
+
 // =======================
-// WINDOW FIX (UNCHANGED)
+// PACIFIC WINDOW FILTER (FIXED)
 // =======================
 function isInWindow(epDate) {
   if (!epDate) return false;
 
-  const today = new Date();
-  const start = new Date();
-  start.setDate(today.getDate() - (DAYS_BACK - 1));
+  const todayStr = pacificDateString(new Date());
+  const today = new Date(todayStr + "T00:00:00Z");
 
-  const d = new Date(epDate + "T00:00:00Z");
+  const start = new Date(today);
+  start.setDate(start.getDate() - (DAYS_BACK - 1));
 
-  return d >= start && d <= today;
+  const ep = new Date(epDate + "T00:00:00Z");
+
+  return ep >= start && ep <= today;
 }
 
 // =======================
@@ -240,7 +245,7 @@ async function build() {
 
   const metas = [];
 
-  fs.mkdirSync(META_DIR, { recursive: true });
+  fs.mkdirSync(CATALOG_DIR, { recursive: true });
 
   for (const entry of showMap.values()) {
     const show = entry.show;
@@ -254,9 +259,10 @@ async function build() {
     const episodes = entry.episodes;
     if (!episodes.length) continue;
 
+    // SORT EPISODES (PACIFIC SAFE)
     episodes.sort((a, b) => {
-      const at = new Date(getStrictEpisodeDate(a) || 0).getTime();
-      const bt = new Date(getStrictEpisodeDate(b) || 0).getTime();
+      const at = new Date(getStrictEpisodeDate(a) + "T00:00:00Z").getTime();
+      const bt = new Date(getStrictEpisodeDate(b) + "T00:00:00Z").getTime();
       return at - bt;
     });
 
@@ -269,46 +275,29 @@ async function build() {
       overview: cleanHTML(ep.summary || "")
     }));
 
-    const metaObj = {
-      meta: {
-        id: stremioId,
-        type: "series",
-        name: show.name,
-        description: cleanHTML(show.summary),
-        poster:
-          show.image?.original ||
-          show.image?.medium ||
-          null,
-        background: show.image?.original || null
-      }
-    };
-
-    fs.writeFileSync(
-      path.join(META_DIR, `${stremioId}.json`),
-      JSON.stringify(metaObj, null, 2)
-    );
-
     metas.push({
       id: stremioId,
       type: "series",
       name: show.name,
       description: cleanHTML(show.summary),
+
       poster:
         show.image?.original ||
         show.image?.medium ||
         null,
+
       background: show.image?.original || null,
       videos
     });
   }
 
-  metas.sort(
-    (a, b) =>
-      new Date(b.videos.at(-1)?.released || 0) -
-      new Date(a.videos.at(-1)?.released || 0)
-  );
+  // SORT SHOWS (PACIFIC SAFE)
+  metas.sort((a, b) => {
+    const getMax = (v) =>
+      Math.max(...v.map(x => new Date(x.released + "T00:00:00Z").getTime()));
 
-  fs.mkdirSync(CATALOG_DIR, { recursive: true });
+    return getMax(b.videos) - getMax(a.videos);
+  });
 
   fs.writeFileSync(
     path.join(CATALOG_DIR, "tvmaze_weekly_schedule.json"),
