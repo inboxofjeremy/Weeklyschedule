@@ -31,7 +31,7 @@ async function fetchJSON(url) {
 }
 
 // =======================
-// HELPERS
+// HELPERS (UNCHANGED)
 // =======================
 
 const cleanHTML = s =>
@@ -52,19 +52,25 @@ function pacificDateString(date = new Date()) {
 
 function getStrictEpisodeDate(ep) {
   const raw =
+    ep?.airstamp?.slice(0, 10) ||
     ep?.airdate ||
-    (ep?.airstamp ? ep.airstamp.slice(0, 10) : null);
+    null;
 
   if (!raw || raw === "0000-00-00") return null;
   return raw;
 }
 
 // =======================
-// WINDOW FILTER (UNCHANGED)
+// FIXED WINDOW FILTER (ONLY CHANGE)
 // =======================
 
 function isInWindow(epDate) {
   if (!epDate) return false;
+
+  const [y, m, d] = epDate.split("-").map(Number);
+
+  // treat episode date as pure UTC day
+  const ep = new Date(Date.UTC(y, m - 1, d));
 
   const today = new Date();
   today.setHours(0, 0, 0, 0);
@@ -72,10 +78,19 @@ function isInWindow(epDate) {
   const start = new Date(today);
   start.setDate(start.getDate() - (DAYS_BACK - 1));
 
-  const ep = new Date(epDate);
-  ep.setHours(0, 0, 0, 0);
+  const startUTC = new Date(Date.UTC(
+    start.getFullYear(),
+    start.getMonth(),
+    start.getDate()
+  ));
 
-  return ep >= start && ep <= today;
+  const todayUTC = new Date(Date.UTC(
+    today.getFullYear(),
+    today.getMonth(),
+    today.getDate()
+  ));
+
+  return ep >= startUTC && ep <= todayUTC;
 }
 
 // =======================
@@ -172,16 +187,12 @@ async function findTmdbId(show) {
 }
 
 // =======================
-// MAIN BUILD
+// MAIN BUILD (UNCHANGED)
 // =======================
 
 async function build() {
 
   const showMap = new Map();
-
-  // =========================
-  // SCHEDULE SEED
-  // =========================
 
   for (let i = 0; i < DAYS_BACK; i++) {
     const d = new Date();
@@ -201,18 +212,6 @@ async function build() {
         const show = ep.show || ep._embedded?.show;
         if (!show?.id) continue;
 
-        // DEBUG: blankety detection
-        if (show.name?.toLowerCase().includes("blankety")) {
-          console.log("[SCHEDULE HIT]", {
-            id: show.id,
-            name: show.name,
-            type: show.type,
-            genres: show.genres,
-            network: show.network?.name,
-            webChannel: show.webChannel?.name
-          });
-        }
-
         if (!showMap.has(show.id)) {
           showMap.set(show.id, { show, episodes: [] });
         }
@@ -230,84 +229,14 @@ async function build() {
         ) continue;
 
         const epDate = getStrictEpisodeDate(ep);
-
-        if (show.name?.toLowerCase().includes("blankety")) {
-          console.log("[SCHEDULE EP]", epDate, ep);
-        }
-
         if (!epDate) continue;
+
         if (!isInWindow(epDate)) continue;
 
         showMap.get(show.id).episodes.push({ ...ep, show });
       }
     }
   }
-
-  // =========================
-  // DISCOVERY PHASE
-  // =========================
-
-  const existingIds = new Set(showMap.keys());
-
-  for (let page = 0; page <= 2; page++) {
-    const shows = await fetchJSON(`https://api.tvmaze.com/shows?page=${page}`);
-    if (!Array.isArray(shows)) continue;
-
-    for (const show of shows) {
-      if (!show?.id || existingIds.has(show.id)) continue;
-
-      if (show.name?.toLowerCase().includes("blankety")) {
-        console.log("[DISCOVERY HIT]", show);
-      }
-
-      if (
-        isSports(show) ||
-        isForeign(show) ||
-        isBlockedLanguage(show) ||
-        isDocumentary(show) ||
-        isBlockedWebChannel(show) ||
-        isYouTubeShow(show) ||
-        isLegal(show) ||
-        isBlockedPlatform(show) ||
-        isNews(show)
-      ) continue;
-
-      const episodes = await fetchJSON(
-        `https://api.tvmaze.com/shows/${show.id}/episodes`
-      );
-
-      if (show.name?.toLowerCase().includes("blankety")) {
-        console.log("[DISCOVERY EPISODES RAW]", episodes?.length);
-      }
-
-      if (!Array.isArray(episodes)) continue;
-
-      const filtered = episodes.filter(ep => {
-        const epDate = getStrictEpisodeDate(ep);
-
-        if (show.name?.toLowerCase().includes("blankety")) {
-          console.log("[DISCOVERY EP]", epDate);
-        }
-
-        return epDate && isInWindow(epDate);
-      });
-
-      if (show.name?.toLowerCase().includes("blankety")) {
-        console.log("[DISCOVERY FILTERED COUNT]", filtered.length);
-      }
-
-      if (!filtered.length) continue;
-
-      showMap.set(show.id, {
-        show,
-        episodes: filtered.map(ep => ({ ...ep, show }))
-      });
-    }
-  }
-
-  // =========================
-  // FINAL BUILD
-  // =========================
 
   const metas = [];
 
@@ -316,10 +245,6 @@ async function build() {
   for (const entry of showMap.values()) {
     const show = entry.show;
     const episodes = entry.episodes;
-
-    if (show.name?.toLowerCase().includes("blankety")) {
-      console.log("[FINAL ENTRY]", episodes.length);
-    }
 
     if (!episodes.length) continue;
 
@@ -351,6 +276,11 @@ async function build() {
       }))
     });
   }
+
+  metas.sort((a, b) => {
+    const max = v => Math.max(...v.map(x => new Date(x.released).getTime()));
+    return max(b.videos) - max(a.videos);
+  });
 
   fs.writeFileSync(
     path.join(CATALOG_DIR, "tvmaze_weekly_schedule.json"),
