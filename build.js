@@ -13,6 +13,10 @@ const DAYS_BACK = 10;
 const TVMAZE_DELAY_MS = 150;
 let lastTvmazeCall = 0;
 
+// =======================
+// FETCH
+// =======================
+
 async function fetchJSON(url) {
   try {
     if (url.includes("api.tvmaze.com")) {
@@ -23,7 +27,6 @@ async function fetchJSON(url) {
 
     const res = await fetch(url);
     if (!res.ok) return null;
-
     return await res.json();
   } catch {
     return null;
@@ -31,26 +34,8 @@ async function fetchJSON(url) {
 }
 
 // =======================
-// HELPERS
+// DATE NORMALIZATION (FIXED)
 // =======================
-
-const cleanHTML = s =>
-  s ? s.replace(/<[^>]+>/g, "").trim() : "";
-
-function pacificDateString(date = new Date()) {
-  const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: "America/Los_Angeles",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit"
-  }).formatToParts(date);
-
-  return `${parts.find(p => p.type === "year").value}-${
-    parts.find(p => p.type === "month").value
-  }-${
-    parts.find(p => p.type === "day").value
-  }`;
-}
 
 function normalizeDate(ep) {
   const raw =
@@ -59,24 +44,26 @@ function normalizeDate(ep) {
     ep?.show?.premiered ||
     null;
 
-  return raw ? raw.slice(0, 10) : null;
+  if (!raw) return null;
+
+  // ALWAYS force pure date string (avoid timezone drift)
+  return String(raw).slice(0, 10);
 }
 
 // =======================
-// WINDOW CHECK (SHOW LEVEL ONLY)
+// WINDOW LOGIC (SHOW LEVEL)
 // =======================
 
-function isInWindow(epDate) {
-  if (!epDate) return false;
+function isInWindow(dateStr) {
+  if (!dateStr) return false;
 
   const today = new Date();
-  today.setHours(0,0,0,0);
+  today.setHours(0, 0, 0, 0);
 
   const start = new Date(today);
   start.setDate(start.getDate() - (DAYS_BACK - 1));
 
-  const ep = new Date(epDate);
-  ep.setHours(0,0,0,0);
+  const ep = new Date(dateStr + "T00:00:00");
 
   return ep >= start && ep <= today;
 }
@@ -179,14 +166,18 @@ async function findTmdbId(show) {
 async function build() {
 
   const showMap = new Map();
-  const eligibleShows = new Set(); // 🔴 SHOW-LEVEL FILTER
+  const episodeSet = new Set();
+  const eligibleShows = new Set();
 
-  // STEP 1: detect eligible shows from window
+  // =======================
+  // STEP 1: FIND ELIGIBLE SHOWS
+  // =======================
+
   for (let i = 0; i < DAYS_BACK; i++) {
     const d = new Date();
     d.setDate(d.getDate() - i);
 
-    const dateStr = pacificDateString(d);
+    const dateStr = d.toISOString().slice(0, 10);
 
     for (const url of [
       `https://api.tvmaze.com/schedule?country=US&date=${dateStr}`,
@@ -213,14 +204,19 @@ async function build() {
 
   console.log("Eligible shows:", eligibleShows.size);
 
-  // STEP 2: collect ALL episodes for eligible shows
-  const episodeSet = new Set();
+  if (eligibleShows.size === 0) {
+    console.log("WARNING: No eligible shows found — check schedule feed/date window.");
+  }
+
+  // =======================
+  // STEP 2: COLLECT ALL EPISODES
+  // =======================
 
   for (let i = 0; i < DAYS_BACK; i++) {
     const d = new Date();
     d.setDate(d.getDate() - i);
 
-    const dateStr = pacificDateString(d);
+    const dateStr = d.toISOString().slice(0, 10);
 
     for (const url of [
       `https://api.tvmaze.com/schedule?country=US&date=${dateStr}`,
@@ -254,7 +250,7 @@ async function build() {
         const key = `${show.id}:${ep.season}:${ep.number}`;
 
         if (episodeSet.has(key)) {
-          if (isBlankety) console.log("DROP DUPLICATE:", key);
+          if (isBlankety) console.log("DROP DUP:", key);
           continue;
         }
 
@@ -267,7 +263,10 @@ async function build() {
     }
   }
 
-  // STEP 3: build output
+  // =======================
+  // STEP 3: OUTPUT
+  // =======================
+
   const metas = [];
 
   fs.mkdirSync(CATALOG_DIR, { recursive: true });
