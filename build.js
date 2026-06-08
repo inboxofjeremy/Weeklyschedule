@@ -37,7 +37,6 @@ async function fetchJSON(url) {
 const cleanHTML = s =>
   s ? s.replace(/<[^>]+>/g, "").trim() : "";
 
-// unchanged
 function pacificDateString(date = new Date()) {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "America/Los_Angeles",
@@ -54,13 +53,13 @@ function pacificDateString(date = new Date()) {
 }
 
 /**
- * FIXED: correct priority is airstamp → airdate
- * This prevents schedule projections from dropping valid episodes
+ * FIX: robust episode date extraction for inconsistent TVMaze schedule feeds
  */
 function getStrictEpisodeDate(ep) {
   const raw =
-    ep?.airstamp?.slice(0, 10) ||
+    ep?.airstamp?.slice?.(0, 10) ||
     ep?.airdate ||
+    ep?.show?.premiered ||
     null;
 
   if (!raw || raw === "0000-00-00") return null;
@@ -221,7 +220,13 @@ async function build() {
           isNews(show)
         ) continue;
 
-        const epDate = getStrictEpisodeDate(ep);
+        // FIX APPLIED HERE
+        const epDate =
+          ep?.airstamp?.slice?.(0, 10) ||
+          ep?.airdate ||
+          ep?.show?.premiered ||
+          null;
+
         if (!epDate) continue;
 
         if (!isInWindow(epDate)) continue;
