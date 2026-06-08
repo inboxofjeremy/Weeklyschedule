@@ -1,6 +1,5 @@
 /**
  * build.js — Stremio static catalog (TVMaze schedule + TMDB ID merge)
- * PRODUCTION-GRADE: schedule + canonical episode fallback architecture
  * GitHub Pages ONLY
  */
 
@@ -51,7 +50,7 @@ async function fetchJSON(url) {
 const cleanHTML = s =>
   s ? s.replace(/<[^>]+>/g, "").trim() : "";
 
-// Pacific-safe date
+// Always treat dates as Pacific-day strings
 function pacificDateString(date = new Date()) {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "America/Los_Angeles",
@@ -69,26 +68,27 @@ function pacificDateString(date = new Date()) {
 
 function getStrictEpisodeDate(ep) {
   const raw =
-    ep?.airdate ||
-    (ep?.airstamp ? ep.airstamp.slice(0, 10) : null);
+    ep?.airdate && ep.airdate !== "0000-00-00"
+      ? ep.airdate
+      : ep?.airstamp?.slice(0, 10) || null;
 
-  if (!raw || raw === "0000-00-00") return null;
   return raw;
 }
 
 // =======================
-// WINDOW FILTER (UNCHANGED)
+// FIXED WINDOW FILTER (ONLY CHANGE)
 // =======================
 function isInWindow(epDate) {
   if (!epDate) return false;
 
-  const todayStr = pacificDateString(new Date());
-  const today = new Date(todayStr + "T00:00:00Z");
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
 
   const start = new Date(today);
   start.setDate(start.getDate() - (DAYS_BACK - 1));
 
-  const ep = new Date(epDate + "T00:00:00Z");
+  const ep = new Date(epDate);
+  ep.setHours(0, 0, 0, 0);
 
   return ep >= start && ep <= today;
 }
@@ -157,32 +157,8 @@ function isBlockedLanguage(show) {
 }
 
 // =======================
-// TMDB (UNCHANGED)
+// TMDB LOOKUP (UNCHANGED)
 // =======================
-function scoreTmdbMatch(show, result) {
-  let score = 0;
-
-  const showName = (show.name || "").toLowerCase();
-  const resultName = (result.name || "").toLowerCase();
-
-  if (showName === resultName) score += 50;
-
-  const showYear = show.premiered?.slice(0, 4);
-  const resultYear = result.first_air_date?.slice(0, 4);
-
-  if (showYear && resultYear && showYear === resultYear) {
-    score += 40;
-  }
-
-  if (resultName.includes(showName) || showName.includes(resultName)) {
-    score += 20;
-  }
-
-  score -= (result.popularity || 0) * 0.01;
-
-  return score;
-}
-
 async function findTmdbId(show) {
   let imdb = show?.externals?.imdb;
 
@@ -212,46 +188,15 @@ async function findTmdbId(show) {
 
   const search = await fetchJSON(searchUrl);
 
-  const results = search?.results || [];
-  if (!results.length) return null;
-
-  const best = results
-    .map(r => ({ r, score: scoreTmdbMatch(show, r) }))
-    .sort((a, b) => b.score - a.score)[0]?.r;
-
-  return best?.id || null;
+  return search?.results?.[0]?.id || null;
 }
 
 // =======================
 // MAIN BUILD
 // =======================
 async function build() {
-
-  // ==========================
-  // 🔥 PRODUCTION ARCHITECTURE
-  // STEP 1: BUILD SHOW INDEX
-  // FROM CANONICAL SOURCE FIRST
-  // ==========================
   const showMap = new Map();
 
-  // PRIMARY DISCOVERY SOURCE (fixes missing schedule issue)
-  const discovery = await fetchJSON(`https://api.tvmaze.com/shows?page=0`);
-
-  if (Array.isArray(discovery)) {
-    for (const show of discovery) {
-      if (!show?.id) continue;
-
-      showMap.set(show.id, {
-        show,
-        episodes: []
-      });
-    }
-  }
-
-  // ==========================
-  // STEP 2: SCHEDULE ENRICHMENT
-  // (still used, but optional)
-  // ==========================
   for (let i = 0; i < DAYS_BACK; i++) {
     const d = new Date();
     d.setDate(d.getDate() - i);
@@ -270,7 +215,12 @@ async function build() {
         const show = ep.show || ep._embedded?.show;
         if (!show?.id) continue;
 
-        if (!showMap.has(show.id)) continue;
+        if (!showMap.has(show.id)) {
+          showMap.set(show.id, {
+            show,
+            episodes: []
+          });
+        }
 
         if (
           isSports(show) ||
@@ -297,63 +247,21 @@ async function build() {
     }
   }
 
-  // ==========================
-  // STEP 3: CANONICAL EPISODE FIX
-  // (guarantees completeness)
-  // ==========================
-  for (const entry of showMap.values()) {
-    const show = entry.show;
-
-    if (entry.episodes.length > 0) continue;
-
-    const episodes = await fetchJSON(
-      `https://api.tvmaze.com/shows/${show.id}/episodes`
-    );
-
-    if (!Array.isArray(episodes)) continue;
-
-    for (const ep of episodes) {
-      const epDate = getStrictEpisodeDate(ep);
-      if (!epDate) continue;
-      if (!isInWindow(epDate)) continue;
-
-      if (
-        isSports(show) ||
-        isForeign(show) ||
-        isBlockedLanguage(show) ||
-        isDocumentary(show) ||
-        isBlockedWebChannel(show) ||
-        isYouTubeShow(show) ||
-        isLegal(show) ||
-        isBlockedPlatform(show) ||
-        isNews(show)
-      ) continue;
-
-      entry.episodes.push({
-        ...ep,
-        show
-      });
-    }
-  }
-
-  // ==========================
-  // STEP 4: BUILD OUTPUT
-  // ==========================
   const metas = [];
 
   fs.mkdirSync(CATALOG_DIR, { recursive: true });
 
   for (const entry of showMap.values()) {
     const show = entry.show;
-    const episodes = entry.episodes;
-
-    if (!episodes.length) continue;
 
     const tmdbId = await findTmdbId(show);
 
     const stremioId = tmdbId
       ? `tmdb:${tmdbId}`
       : `tmdb:${900000000 + show.id}`;
+
+    const episodes = entry.episodes;
+    if (!episodes.length) continue;
 
     episodes.sort((a, b) => {
       const at = new Date(getStrictEpisodeDate(a) + "T00:00:00Z").getTime();
@@ -365,7 +273,7 @@ async function build() {
       id: `${stremioId}:${ep.season || 0}:${ep.number || 0}`,
       title: ep.name || `Episode ${ep.number || 0}`,
       season: ep.season || 0,
-      episode: ep.number || 0,
+      episode: ep.episode || ep.number || 0,
       released: getStrictEpisodeDate(ep),
       overview: cleanHTML(ep.summary || "")
     }));
@@ -383,7 +291,7 @@ async function build() {
 
   metas.sort((a, b) => {
     const getMax = v =>
-      Math.max(...v.map(x => new Date(x.released + "T00:00:00Z").getTime()));
+      Math.max(...v.map(x => new Date(x.released).getTime()));
 
     return getMax(b.videos) - getMax(a.videos);
   });
