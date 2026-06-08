@@ -76,7 +76,7 @@ function getStrictEpisodeDate(ep) {
 }
 
 // =======================
-// PACIFIC WINDOW FILTER (FIXED)
+// PACIFIC WINDOW FILTER
 // =======================
 function isInWindow(epDate) {
   if (!epDate) return false;
@@ -156,7 +156,7 @@ function isBlockedLanguage(show) {
 }
 
 // =======================
-// TMDB LOOKUP (UNCHANGED LOGIC)
+// TMDB LOOKUP (UNCHANGED)
 // =======================
 function scoreTmdbMatch(show, result) {
   let score = 0;
@@ -274,29 +274,30 @@ async function build() {
     }
   }
 
-  // =========================
-  // 🔧 FIX: EPISODE RECOVERY
-  // =========================
+  // ===============================
+  // 🔧 ARCHITECTURAL FIX (FULL LAYER)
+  // TVMaze canonical episode recovery
+  // ===============================
   for (const entry of showMap.values()) {
-    if (entry.episodes.length) continue;
+    if (entry.episodes.length > 0) continue;
 
     const show = entry.show;
 
-    const fallback = await fetchJSON(
+    const fullEpisodes = await fetchJSON(
       `https://api.tvmaze.com/shows/${show.id}/episodes`
     );
 
-    if (Array.isArray(fallback)) {
-      for (const ep of fallback) {
-        const epDate = getStrictEpisodeDate(ep);
-        if (!epDate) continue;
-        if (!isInWindow(epDate)) continue;
+    if (!Array.isArray(fullEpisodes)) continue;
 
-        entry.episodes.push({
-          ...ep,
-          show
-        });
-      }
+    for (const ep of fullEpisodes) {
+      const epDate = getStrictEpisodeDate(ep);
+      if (!epDate) continue;
+      if (!isInWindow(epDate)) continue;
+
+      entry.episodes.push({
+        ...ep,
+        show
+      });
     }
   }
 
