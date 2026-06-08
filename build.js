@@ -47,14 +47,9 @@ function pacificDateString(date = new Date()) {
 
   return `${parts.find(p => p.type === "year").value}-${
     parts.find(p => p.type === "month").value
-  }-${
-    parts.find(p => p.type === "day").value
-  }`;
+  }-${parts.find(p => p.type === "day").value}`;
 }
 
-/**
- * FIX: robust episode date extraction for inconsistent TVMaze schedule feeds
- */
 function getStrictEpisodeDate(ep) {
   const raw =
     ep?.airstamp?.slice?.(0, 10) ||
@@ -179,7 +174,7 @@ async function findTmdbId(show) {
 }
 
 // =======================
-// MAIN BUILD (UNCHANGED)
+// MAIN BUILD
 // =======================
 
 async function build() {
@@ -204,6 +199,14 @@ async function build() {
         const show = ep.show || ep._embedded?.show;
         if (!show?.id) continue;
 
+        const isBlankety = show.name?.toLowerCase().includes("blankety");
+
+        if (isBlankety) {
+          console.log("\n=== BLANKETY DEBUG ===");
+          console.log("SHOW:", show);
+          console.log("EP RAW:", ep);
+        }
+
         if (!showMap.has(show.id)) {
           showMap.set(show.id, { show, episodes: [] });
         }
@@ -218,20 +221,36 @@ async function build() {
           isLegal(show) ||
           isBlockedPlatform(show) ||
           isNews(show)
-        ) continue;
+        ) {
+          if (isBlankety) console.log("FILTERED OUT AT SHOW LEVEL");
+          continue;
+        }
 
-        // FIX APPLIED HERE
         const epDate =
           ep?.airstamp?.slice?.(0, 10) ||
           ep?.airdate ||
           ep?.show?.premiered ||
           null;
 
-        if (!epDate) continue;
+        if (isBlankety) {
+          console.log("EP DATE:", epDate);
+        }
 
-        if (!isInWindow(epDate)) continue;
+        if (!epDate) {
+          if (isBlankety) console.log("NO EP DATE → DROP");
+          continue;
+        }
+
+        if (!isInWindow(epDate)) {
+          if (isBlankety) console.log("OUT OF WINDOW → DROP", epDate);
+          continue;
+        }
 
         showMap.get(show.id).episodes.push({ ...ep, show });
+
+        if (isBlankety) {
+          console.log("ADDED EPISODE");
+        }
       }
     }
   }
@@ -244,6 +263,11 @@ async function build() {
     const show = entry.show;
     const episodes = entry.episodes;
 
+    if (show.name?.toLowerCase().includes("blankety")) {
+      console.log("\n=== FINAL CHECK ===");
+      console.log("EPISODES:", episodes.length);
+    }
+
     if (!episodes.length) continue;
 
     const tmdbId = await findTmdbId(show);
@@ -251,11 +275,6 @@ async function build() {
     const stremioId = tmdbId
       ? `tmdb:${tmdbId}`
       : `tmdb:${900000000 + show.id}`;
-
-    episodes.sort((a, b) =>
-      new Date(getStrictEpisodeDate(a)).getTime() -
-      new Date(getStrictEpisodeDate(b)).getTime()
-    );
 
     metas.push({
       id: stremioId,
@@ -275,17 +294,12 @@ async function build() {
     });
   }
 
-  metas.sort((a, b) => {
-    const max = v => Math.max(...v.map(x => new Date(x.released).getTime()));
-    return max(b.videos) - max(a.videos);
-  });
+  console.log("Build complete:", metas.length);
 
   fs.writeFileSync(
     path.join(CATALOG_DIR, "tvmaze_weekly_schedule.json"),
     JSON.stringify({ metas }, null, 2)
   );
-
-  console.log("Build complete:", metas.length);
 }
 
 build().catch(console.error);
