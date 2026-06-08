@@ -1,5 +1,6 @@
 /**
  * build.js — Stremio static catalog (TVMaze schedule + TMDB ID merge)
+ * PRODUCTION-GRADE: schedule + canonical episode fallback architecture
  * GitHub Pages ONLY
  */
 
@@ -50,7 +51,7 @@ async function fetchJSON(url) {
 const cleanHTML = s =>
   s ? s.replace(/<[^>]+>/g, "").trim() : "";
 
-// Always treat dates as Pacific-day strings
+// Pacific-safe date
 function pacificDateString(date = new Date()) {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "America/Los_Angeles",
@@ -76,7 +77,7 @@ function getStrictEpisodeDate(ep) {
 }
 
 // =======================
-// PACIFIC WINDOW FILTER
+// WINDOW FILTER (UNCHANGED)
 // =======================
 function isInWindow(epDate) {
   if (!epDate) return false;
@@ -225,11 +226,32 @@ async function findTmdbId(show) {
 // MAIN BUILD
 // =======================
 async function build() {
+
+  // ==========================
+  // 🔥 PRODUCTION ARCHITECTURE
+  // STEP 1: BUILD SHOW INDEX
+  // FROM CANONICAL SOURCE FIRST
+  // ==========================
   const showMap = new Map();
 
-  // =======================
-  // PRIMARY: SCHEDULE SEED
-  // =======================
+  // PRIMARY DISCOVERY SOURCE (fixes missing schedule issue)
+  const discovery = await fetchJSON(`https://api.tvmaze.com/shows?page=0`);
+
+  if (Array.isArray(discovery)) {
+    for (const show of discovery) {
+      if (!show?.id) continue;
+
+      showMap.set(show.id, {
+        show,
+        episodes: []
+      });
+    }
+  }
+
+  // ==========================
+  // STEP 2: SCHEDULE ENRICHMENT
+  // (still used, but optional)
+  // ==========================
   for (let i = 0; i < DAYS_BACK; i++) {
     const d = new Date();
     d.setDate(d.getDate() - i);
@@ -248,6 +270,8 @@ async function build() {
         const show = ep.show || ep._embedded?.show;
         if (!show?.id) continue;
 
+        if (!showMap.has(show.id)) continue;
+
         if (
           isSports(show) ||
           isForeign(show) ||
@@ -265,67 +289,71 @@ async function build() {
 
         if (!isInWindow(epDate)) continue;
 
-        if (!showMap.has(show.id)) {
-          showMap.set(show.id, {
-            show,
-            episodes: []
-          });
-        }
-
-        showMap.get(show.id).episodes.push(ep);
+        showMap.get(show.id).episodes.push({
+          ...ep,
+          show
+        });
       }
     }
   }
 
-  // =======================
-  // 🔧 CANNONICAL SHOW FIX
-  // NEVER BREAK FALLBACK
-  // =======================
-  const seededIds = new Set(showMap.keys());
+  // ==========================
+  // STEP 3: CANONICAL EPISODE FIX
+  // (guarantees completeness)
+  // ==========================
+  for (const entry of showMap.values()) {
+    const show = entry.show;
 
-  for (const showId of seededIds) {
-    const entry = showMap.get(showId);
-    if (entry.episodes.length) continue;
+    if (entry.episodes.length > 0) continue;
 
-    const fullShow = await fetchJSON(
-      `https://api.tvmaze.com/shows/${showId}`
+    const episodes = await fetchJSON(
+      `https://api.tvmaze.com/shows/${show.id}/episodes`
     );
 
-    const fullEpisodes = await fetchJSON(
-      `https://api.tvmaze.com/shows/${showId}/episodes`
-    );
+    if (!Array.isArray(episodes)) continue;
 
-    if (!fullShow || !Array.isArray(fullEpisodes)) continue;
-
-    entry.show = fullShow;
-
-    for (const ep of fullEpisodes) {
+    for (const ep of episodes) {
       const epDate = getStrictEpisodeDate(ep);
       if (!epDate) continue;
       if (!isInWindow(epDate)) continue;
 
+      if (
+        isSports(show) ||
+        isForeign(show) ||
+        isBlockedLanguage(show) ||
+        isDocumentary(show) ||
+        isBlockedWebChannel(show) ||
+        isYouTubeShow(show) ||
+        isLegal(show) ||
+        isBlockedPlatform(show) ||
+        isNews(show)
+      ) continue;
+
       entry.episodes.push({
         ...ep,
-        show: fullShow
+        show
       });
     }
   }
 
+  // ==========================
+  // STEP 4: BUILD OUTPUT
+  // ==========================
   const metas = [];
 
   fs.mkdirSync(CATALOG_DIR, { recursive: true });
 
   for (const entry of showMap.values()) {
     const show = entry.show;
+    const episodes = entry.episodes;
+
+    if (!episodes.length) continue;
 
     const tmdbId = await findTmdbId(show);
 
     const stremioId = tmdbId
       ? `tmdb:${tmdbId}`
       : `tmdb:${900000000 + show.id}`;
-
-    const episodes = entry.episodes;
-    if (!episodes.length) continue;
 
     episodes.sort((a, b) => {
       const at = new Date(getStrictEpisodeDate(a) + "T00:00:00Z").getTime();
