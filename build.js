@@ -68,10 +68,10 @@ function pacificDateString(date = new Date()) {
 
 function getStrictEpisodeDate(ep) {
   const raw =
-    ep?.airdate && ep.airdate !== "0000-00-00"
-      ? ep.airdate
-      : ep?.airstamp?.slice(0, 10) || null;
+    ep?.airdate ||
+    (ep?.airstamp ? ep.airstamp.slice(0, 10) : null);
 
+  if (!raw || raw === "0000-00-00") return null;
   return raw;
 }
 
@@ -156,7 +156,7 @@ function isBlockedLanguage(show) {
 }
 
 // =======================
-// TMDB LOOKUP (UNCHANGED)
+// TMDB (UNCHANGED)
 // =======================
 function scoreTmdbMatch(show, result) {
   let score = 0;
@@ -227,6 +227,9 @@ async function findTmdbId(show) {
 async function build() {
   const showMap = new Map();
 
+  // =======================
+  // PRIMARY: SCHEDULE SEED
+  // =======================
   for (let i = 0; i < DAYS_BACK; i++) {
     const d = new Date();
     d.setDate(d.getDate() - i);
@@ -274,20 +277,27 @@ async function build() {
     }
   }
 
-  // ===============================
-  // 🔧 ARCHITECTURAL FIX (FULL LAYER)
-  // TVMaze canonical episode recovery
-  // ===============================
-  for (const entry of showMap.values()) {
-    if (entry.episodes.length > 0) continue;
+  // =======================
+  // 🔧 CANNONICAL SHOW FIX
+  // NEVER BREAK FALLBACK
+  // =======================
+  const seededIds = new Set(showMap.keys());
 
-    const show = entry.show;
+  for (const showId of seededIds) {
+    const entry = showMap.get(showId);
+    if (entry.episodes.length) continue;
 
-    const fullEpisodes = await fetchJSON(
-      `https://api.tvmaze.com/shows/${show.id}/episodes`
+    const fullShow = await fetchJSON(
+      `https://api.tvmaze.com/shows/${showId}`
     );
 
-    if (!Array.isArray(fullEpisodes)) continue;
+    const fullEpisodes = await fetchJSON(
+      `https://api.tvmaze.com/shows/${showId}/episodes`
+    );
+
+    if (!fullShow || !Array.isArray(fullEpisodes)) continue;
+
+    entry.show = fullShow;
 
     for (const ep of fullEpisodes) {
       const epDate = getStrictEpisodeDate(ep);
@@ -296,7 +306,7 @@ async function build() {
 
       entry.episodes.push({
         ...ep,
-        show
+        show: fullShow
       });
     }
   }
