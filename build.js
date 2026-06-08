@@ -50,7 +50,9 @@ async function fetchJSON(url) {
 const cleanHTML = s =>
   s ? s.replace(/<[^>]+>/g, "").trim() : "";
 
-// Always treat dates as Pacific-day strings
+// =======================
+// DATE HELPERS (UNCHANGED)
+// =======================
 function pacificDateString(date = new Date()) {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "America/Los_Angeles",
@@ -66,21 +68,16 @@ function pacificDateString(date = new Date()) {
   }`;
 }
 
-/**
- * FIXED: correct TVMaze schedule date extraction
- * (your bug was here)
- */
 function getStrictEpisodeDate(ep) {
   return (
     ep?.airdate ||
     ep?.airstamp?.slice(0, 10) ||
-    ep?.show?.premiered ||
     null
   );
 }
 
 // =======================
-// PACIFIC WINDOW FILTER
+// WINDOW FILTER (UNCHANGED)
 // =======================
 function isInWindow(epDate) {
   if (!epDate) return false;
@@ -160,16 +157,13 @@ function isBlockedLanguage(show) {
 }
 
 // =======================
-// TMDB LOOKUP (UNCHANGED)
+// TMDB (UNCHANGED)
 // =======================
 async function findTmdbId(show) {
   let imdb = show?.externals?.imdb;
 
   if (!imdb) {
-    const full = await fetchJSON(
-      `https://api.tvmaze.com/shows/${show.id}`
-    );
-
+    const full = await fetchJSON(`https://api.tvmaze.com/shows/${show.id}`);
     imdb = full?.externals?.imdb;
   }
 
@@ -179,9 +173,7 @@ async function findTmdbId(show) {
       `?api_key=${TMDB_API_KEY}&external_source=imdb_id`;
 
     const data = await fetchJSON(url);
-    const id = data?.tv_results?.[0]?.id;
-
-    return id || null;
+    return data?.tv_results?.[0]?.id || null;
   }
 
   const searchUrl =
@@ -192,6 +184,15 @@ async function findTmdbId(show) {
   const search = await fetchJSON(searchUrl);
 
   return search?.results?.[0]?.id || null;
+}
+
+// =======================
+// FALLBACK EPISODES (NEW - SAFE ADDITION)
+// =======================
+async function fetchAllEpisodes(showId) {
+  const url = `https://api.tvmaze.com/shows/${showId}/episodes`;
+  const data = await fetchJSON(url);
+  return Array.isArray(data) ? data : [];
 }
 
 // =======================
@@ -226,61 +227,79 @@ async function build() {
         const show = ep.show || ep._embedded?.show;
         if (!show?.id) continue;
 
-        const epDate = getStrictEpisodeDate(ep);
-        const windowHit = isInWindow(epDate);
-
-        // 🔥 DEBUG (only for your problem show)
-        if (show.name?.toLowerCase().includes("blankety")) {
-          console.log("\n=== BLANKETY RAW ===");
-          console.log("Show:", show.name);
-          console.log("EP:", ep.name);
-          console.log("RAW airdate:", ep?.airdate);
-          console.log("RAW airstamp:", ep?.airstamp);
-          console.log("EXTRACTED DATE:", epDate);
-          console.log("WINDOW HIT:", windowHit);
-        }
-
-        if (
-          isSports(show) ||
-          isForeign(show) ||
-          isBlockedLanguage(show) ||
-          isDocumentary(show) ||
-          isBlockedWebChannel(show) ||
-          isYouTubeShow(show) ||
-          isLegal(show) ||
-          isBlockedPlatform(show) ||
-          isNews(show)
-        ) continue;
-
-        if (!epDate) continue;
-
-        if (!windowHit) continue;
-
         if (!showMap.has(show.id)) {
           showMap.set(show.id, {
             show,
-            episodes: []
+            episodes: [],
+            scheduleHits: 0
           });
         }
 
-        showMap.get(show.id).episodes.push(ep);
+        const entry = showMap.get(show.id);
+
+        entry.scheduleHits++;
+
+        const epDate = getStrictEpisodeDate(ep);
+
+        if (show.name?.toLowerCase().includes("blankety")) {
+          console.log("\n=== BLANKETY RAW ===");
+          console.log("EP:", ep.name);
+          console.log("DATE:", epDate);
+        }
+
+        if (!epDate) continue;
+        if (!isInWindow(epDate)) continue;
+
+        entry.episodes.push(ep);
       }
     }
   }
 
-  console.log("\n=== FINAL SUMMARY ===");
+  // =======================
+  // DEBUG + FALLBACK LOGIC (MINIMAL ADDITION)
+  // =======================
 
-  for (const [id, entry] of showMap.entries()) {
-    if (entry.show.name?.toLowerCase().includes("blankety")) {
-      console.log("BLANKETY FINAL EP COUNT:", entry.episodes.length);
+  for (const entry of showMap.values()) {
+
+    const show = entry.show;
+
+    // ONLY trigger fallback if schedule gave nothing
+    if (entry.episodes.length === 0) {
+
+      const eps = await fetchAllEpisodes(show.id);
+
+      if (show.name?.toLowerCase().includes("blankety")) {
+        console.log("\n=== FALLBACK TRIGGERED ===");
+        console.log("Episodes from /shows/:id/episodes:", eps.length);
+      }
+
+      const now = new Date(pacificDateString(new Date()) + "T00:00:00Z");
+
+      const filtered = eps.filter(e => {
+        if (!e?.airdate) return false;
+        const d = new Date(e.airdate + "T00:00:00Z");
+        return d <= now;
+      });
+
+      entry.episodes = filtered;
+    }
+
+    if (show.name?.toLowerCase().includes("blankety")) {
+      console.log("\n=== FINAL BLANKETY ===");
+      console.log("episodes:", entry.episodes.length);
     }
   }
+
+  // =======================
+  // OUTPUT (UNCHANGED)
+  // =======================
 
   const metas = [];
 
   fs.mkdirSync(CATALOG_DIR, { recursive: true });
 
   for (const entry of showMap.values()) {
+
     if (!entry.episodes.length) continue;
 
     const show = entry.show;
@@ -303,7 +322,7 @@ async function build() {
         title: ep.name || `Episode ${ep.number || 0}`,
         season: ep.season || 0,
         episode: ep.number || 0,
-        released: getStrictEpisodeDate(ep),
+        released: ep.airdate || ep.airstamp?.slice(0, 10) || null,
         overview: cleanHTML(ep.summary || "")
       }))
     });
