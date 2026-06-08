@@ -156,7 +156,7 @@ function isBlockedLanguage(show) {
 }
 
 // =======================
-// TMDB MATCH SCORE (FIX ADDED)
+// TMDB LOOKUP (UNCHANGED LOGIC)
 // =======================
 function scoreTmdbMatch(show, result) {
   let score = 0;
@@ -182,9 +182,6 @@ function scoreTmdbMatch(show, result) {
   return score;
 }
 
-// =======================
-// TMDB LOOKUP (FIXED ONLY IN SEARCH FALLBACK)
-// =======================
 async function findTmdbId(show) {
   let imdb = show?.externals?.imdb;
 
@@ -214,9 +211,7 @@ async function findTmdbId(show) {
 
   const search = await fetchJSON(searchUrl);
 
-  // 🔧 FIXED: weighted selection instead of [0]
   const results = search?.results || [];
-
   if (!results.length) return null;
 
   const best = results
@@ -279,6 +274,32 @@ async function build() {
     }
   }
 
+  // =========================
+  // 🔧 FIX: EPISODE RECOVERY
+  // =========================
+  for (const entry of showMap.values()) {
+    if (entry.episodes.length) continue;
+
+    const show = entry.show;
+
+    const fallback = await fetchJSON(
+      `https://api.tvmaze.com/shows/${show.id}/episodes`
+    );
+
+    if (Array.isArray(fallback)) {
+      for (const ep of fallback) {
+        const epDate = getStrictEpisodeDate(ep);
+        if (!epDate) continue;
+        if (!isInWindow(epDate)) continue;
+
+        entry.episodes.push({
+          ...ep,
+          show
+        });
+      }
+    }
+  }
+
   const metas = [];
 
   fs.mkdirSync(CATALOG_DIR, { recursive: true });
@@ -315,19 +336,14 @@ async function build() {
       type: "series",
       name: show.name,
       description: cleanHTML(show.summary),
-
-      poster:
-        show.image?.original ||
-        show.image?.medium ||
-        null,
-
+      poster: show.image?.original || show.image?.medium || null,
       background: show.image?.original || null,
       videos
     });
   }
 
   metas.sort((a, b) => {
-    const getMax = (v) =>
+    const getMax = v =>
       Math.max(...v.map(x => new Date(x.released + "T00:00:00Z").getTime()));
 
     return getMax(b.videos) - getMax(a.videos);
