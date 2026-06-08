@@ -47,22 +47,22 @@ function pacificDateString(date = new Date()) {
 
   return `${parts.find(p => p.type === "year").value}-${
     parts.find(p => p.type === "month").value
-  }-${parts.find(p => p.type === "day").value}`;
+  }-${
+    parts.find(p => p.type === "day").value
+  }`;
 }
 
 function getStrictEpisodeDate(ep) {
-  const raw =
+  return (
     ep?.airstamp?.slice?.(0, 10) ||
     ep?.airdate ||
     ep?.show?.premiered ||
-    null;
-
-  if (!raw || raw === "0000-00-00") return null;
-  return raw;
+    null
+  );
 }
 
 // =======================
-// WINDOW FILTER (UNCHANGED)
+// WINDOW FILTER
 // =======================
 
 function isInWindow(epDate) {
@@ -141,7 +141,7 @@ function isBlockedLanguage(show) {
 }
 
 // =======================
-// TMDB (UNCHANGED)
+// TMDB
 // =======================
 
 async function findTmdbId(show) {
@@ -174,12 +174,13 @@ async function findTmdbId(show) {
 }
 
 // =======================
-// MAIN BUILD
+// MAIN
 // =======================
 
 async function build() {
 
   const showMap = new Map();
+  const episodeSet = new Set(); // 🔴 FIX: global episode dedupe
 
   for (let i = 0; i < DAYS_BACK; i++) {
     const d = new Date();
@@ -192,6 +193,7 @@ async function build() {
       `https://api.tvmaze.com/schedule/web?date=${dateStr}`,
       `https://api.tvmaze.com/schedule/full?date=${dateStr}`
     ]) {
+
       const list = await fetchJSON(url);
       if (!Array.isArray(list)) continue;
 
@@ -202,9 +204,8 @@ async function build() {
         const isBlankety = show.name?.toLowerCase().includes("blankety");
 
         if (isBlankety) {
-          console.log("\n=== BLANKETY DEBUG ===");
-          console.log("SHOW:", show);
-          console.log("EP RAW:", ep);
+          console.log("\n=== BLANKETY RAW ===");
+          console.log(show.name);
         }
 
         if (!showMap.has(show.id)) {
@@ -222,35 +223,39 @@ async function build() {
           isBlockedPlatform(show) ||
           isNews(show)
         ) {
-          if (isBlankety) console.log("FILTERED OUT AT SHOW LEVEL");
+          if (isBlankety) console.log("FILTERED SHOW LEVEL");
           continue;
         }
 
-        const epDate =
-          ep?.airstamp?.slice?.(0, 10) ||
-          ep?.airdate ||
-          ep?.show?.premiered ||
-          null;
+        const epDate = getStrictEpisodeDate(ep);
 
         if (isBlankety) {
-          console.log("EP DATE:", epDate);
+          console.log("EP:", ep.name, ep.season, ep.number);
+          console.log("DATE:", epDate);
         }
 
         if (!epDate) {
-          if (isBlankety) console.log("NO EP DATE → DROP");
+          if (isBlankety) console.log("DROP: no date");
           continue;
         }
 
         if (!isInWindow(epDate)) {
-          if (isBlankety) console.log("OUT OF WINDOW → DROP", epDate);
+          if (isBlankety) console.log("DROP: out of window", epDate);
           continue;
         }
 
+        const key = `${show.id}:${ep.season}:${ep.number}:${epDate}`;
+
+        if (episodeSet.has(key)) {
+          if (isBlankety) console.log("DROP: duplicate", key);
+          continue;
+        }
+
+        episodeSet.add(key);
+
         showMap.get(show.id).episodes.push({ ...ep, show });
 
-        if (isBlankety) {
-          console.log("ADDED EPISODE");
-        }
+        if (isBlankety) console.log("KEEP");
       }
     }
   }
@@ -264,8 +269,8 @@ async function build() {
     const episodes = entry.episodes;
 
     if (show.name?.toLowerCase().includes("blankety")) {
-      console.log("\n=== FINAL CHECK ===");
-      console.log("EPISODES:", episodes.length);
+      console.log("\n=== FINAL BLANKETY ===");
+      console.log("episodes:", episodes.length);
     }
 
     if (!episodes.length) continue;
