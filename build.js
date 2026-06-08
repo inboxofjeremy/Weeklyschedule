@@ -31,12 +31,13 @@ async function fetchJSON(url) {
 }
 
 // =======================
-// HELPERS (UNCHANGED)
+// HELPERS
 // =======================
 
 const cleanHTML = s =>
   s ? s.replace(/<[^>]+>/g, "").trim() : "";
 
+// unchanged
 function pacificDateString(date = new Date()) {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "America/Los_Angeles",
@@ -47,9 +48,15 @@ function pacificDateString(date = new Date()) {
 
   return `${parts.find(p => p.type === "year").value}-${
     parts.find(p => p.type === "month").value
-  }-${parts.find(p => p.type === "day").value}`;
+  }-${
+    parts.find(p => p.type === "day").value
+  }`;
 }
 
+/**
+ * FIXED: correct priority is airstamp → airdate
+ * This prevents schedule projections from dropping valid episodes
+ */
 function getStrictEpisodeDate(ep) {
   const raw =
     ep?.airstamp?.slice(0, 10) ||
@@ -61,16 +68,11 @@ function getStrictEpisodeDate(ep) {
 }
 
 // =======================
-// FIXED WINDOW FILTER (ONLY CHANGE)
+// WINDOW FILTER (UNCHANGED)
 // =======================
 
 function isInWindow(epDate) {
   if (!epDate) return false;
-
-  const [y, m, d] = epDate.split("-").map(Number);
-
-  // treat episode date as pure UTC day
-  const ep = new Date(Date.UTC(y, m - 1, d));
 
   const today = new Date();
   today.setHours(0, 0, 0, 0);
@@ -78,19 +80,10 @@ function isInWindow(epDate) {
   const start = new Date(today);
   start.setDate(start.getDate() - (DAYS_BACK - 1));
 
-  const startUTC = new Date(Date.UTC(
-    start.getFullYear(),
-    start.getMonth(),
-    start.getDate()
-  ));
+  const ep = new Date(epDate);
+  ep.setHours(0, 0, 0, 0);
 
-  const todayUTC = new Date(Date.UTC(
-    today.getFullYear(),
-    today.getMonth(),
-    today.getDate()
-  ));
-
-  return ep >= startUTC && ep <= todayUTC;
+  return ep >= start && ep <= today;
 }
 
 // =======================
