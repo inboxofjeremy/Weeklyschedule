@@ -156,7 +156,34 @@ function isBlockedLanguage(show) {
 }
 
 // =======================
-// TMDB LOOKUP (UNCHANGED)
+// TMDB MATCH SCORE (FIX ADDED)
+// =======================
+function scoreTmdbMatch(show, result) {
+  let score = 0;
+
+  const showName = (show.name || "").toLowerCase();
+  const resultName = (result.name || "").toLowerCase();
+
+  if (showName === resultName) score += 50;
+
+  const showYear = show.premiered?.slice(0, 4);
+  const resultYear = result.first_air_date?.slice(0, 4);
+
+  if (showYear && resultYear && showYear === resultYear) {
+    score += 40;
+  }
+
+  if (resultName.includes(showName) || showName.includes(resultName)) {
+    score += 20;
+  }
+
+  score -= (result.popularity || 0) * 0.01;
+
+  return score;
+}
+
+// =======================
+// TMDB LOOKUP (FIXED ONLY IN SEARCH FALLBACK)
 // =======================
 async function findTmdbId(show) {
   let imdb = show?.externals?.imdb;
@@ -187,7 +214,16 @@ async function findTmdbId(show) {
 
   const search = await fetchJSON(searchUrl);
 
-  return search?.results?.[0]?.id || null;
+  // 🔧 FIXED: weighted selection instead of [0]
+  const results = search?.results || [];
+
+  if (!results.length) return null;
+
+  const best = results
+    .map(r => ({ r, score: scoreTmdbMatch(show, r) }))
+    .sort((a, b) => b.score - a.score)[0]?.r;
+
+  return best?.id || null;
 }
 
 // =======================
@@ -259,7 +295,6 @@ async function build() {
     const episodes = entry.episodes;
     if (!episodes.length) continue;
 
-    // SORT EPISODES (PACIFIC SAFE)
     episodes.sort((a, b) => {
       const at = new Date(getStrictEpisodeDate(a) + "T00:00:00Z").getTime();
       const bt = new Date(getStrictEpisodeDate(b) + "T00:00:00Z").getTime();
@@ -291,7 +326,6 @@ async function build() {
     });
   }
 
-  // SORT SHOWS (PACIFIC SAFE)
   metas.sort((a, b) => {
     const getMax = (v) =>
       Math.max(...v.map(x => new Date(x.released + "T00:00:00Z").getTime()));
