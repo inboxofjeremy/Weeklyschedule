@@ -51,7 +51,7 @@ const cleanHTML = s =>
   s ? s.replace(/<[^>]+>/g, "").trim() : "";
 
 // =======================
-// DATE HELPERS (UNCHANGED)
+// DATE HELPERS
 // =======================
 function pacificDateString(date = new Date()) {
   const parts = new Intl.DateTimeFormat("en-CA", {
@@ -77,7 +77,7 @@ function getStrictEpisodeDate(ep) {
 }
 
 // =======================
-// WINDOW FILTER (UNCHANGED)
+// WINDOW FILTER
 // =======================
 function isInWindow(epDate) {
   if (!epDate) return false;
@@ -94,7 +94,7 @@ function isInWindow(epDate) {
 }
 
 // =======================
-// FILTERS (UNCHANGED)
+// FILTERS
 // =======================
 function isSports(show) {
   return (
@@ -157,13 +157,15 @@ function isBlockedLanguage(show) {
 }
 
 // =======================
-// TMDB (UNCHANGED)
+// TMDB
 // =======================
 async function findTmdbId(show) {
   let imdb = show?.externals?.imdb;
 
   if (!imdb) {
-    const full = await fetchJSON(`https://api.tvmaze.com/shows/${show.id}`);
+    const full = await fetchJSON(
+      `https://api.tvmaze.com/shows/${show.id}`
+    );
     imdb = full?.externals?.imdb;
   }
 
@@ -187,7 +189,7 @@ async function findTmdbId(show) {
 }
 
 // =======================
-// FALLBACK EPISODES (NEW - SAFE ADDITION)
+// FALLBACK EPISODES
 // =======================
 async function fetchAllEpisodes(showId) {
   const url = `https://api.tvmaze.com/shows/${showId}/episodes`;
@@ -204,6 +206,7 @@ async function build() {
 
   console.log("=== BUILD START ===");
 
+  // STEP 1: SCHEDULE COLLECTION
   for (let i = 0; i < DAYS_BACK; i++) {
     const d = new Date();
     d.setDate(d.getDate() - i);
@@ -221,8 +224,6 @@ async function build() {
       const list = await fetchJSON(url);
       if (!Array.isArray(list)) continue;
 
-      console.log("Feed:", url, "items:", list.length);
-
       for (const ep of list) {
         const show = ep.show || ep._embedded?.show;
         if (!show?.id) continue;
@@ -236,7 +237,6 @@ async function build() {
         }
 
         const entry = showMap.get(show.id);
-
         entry.scheduleHits++;
 
         const epDate = getStrictEpisodeDate(ep);
@@ -256,27 +256,37 @@ async function build() {
   }
 
   // =======================
-  // DEBUG + FALLBACK LOGIC (MINIMAL ADDITION)
+  // STEP 2: FALLBACK (FILTER SAFE)
   // =======================
-
   for (const entry of showMap.values()) {
 
     const show = entry.show;
 
-    // ONLY trigger fallback if schedule gave nothing
-    if (entry.episodes.length === 0) {
+    // only fallback if schedule is weak
+    const shouldFallback = entry.episodes.length === 0 && entry.scheduleHits < 3;
+
+    if (shouldFallback) {
 
       const eps = await fetchAllEpisodes(show.id);
-
-      if (show.name?.toLowerCase().includes("blankety")) {
-        console.log("\n=== FALLBACK TRIGGERED ===");
-        console.log("Episodes from /shows/:id/episodes:", eps.length);
-      }
 
       const now = new Date(pacificDateString(new Date()) + "T00:00:00Z");
 
       const filtered = eps.filter(e => {
         if (!e?.airdate) return false;
+
+        // APPLY SAME FILTERS
+        if (
+          isSports(show) ||
+          isForeign(show) ||
+          isBlockedLanguage(show) ||
+          isDocumentary(show) ||
+          isBlockedWebChannel(show) ||
+          isYouTubeShow(show) ||
+          isLegal(show) ||
+          isBlockedPlatform(show) ||
+          isNews(show)
+        ) return false;
+
         const d = new Date(e.airdate + "T00:00:00Z");
         return d <= now;
       });
@@ -291,9 +301,8 @@ async function build() {
   }
 
   // =======================
-  // OUTPUT (UNCHANGED)
+  // OUTPUT
   // =======================
-
   const metas = [];
 
   fs.mkdirSync(CATALOG_DIR, { recursive: true });
