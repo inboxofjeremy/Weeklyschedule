@@ -66,13 +66,17 @@ function pacificDateString(date = new Date()) {
   }`;
 }
 
+/**
+ * FIXED: correct TVMaze schedule date extraction
+ * (your bug was here)
+ */
 function getStrictEpisodeDate(ep) {
-  const raw =
-    ep?.airdate && ep.airdate !== "0000-00-00"
-      ? ep.airdate
-      : ep?.airstamp?.slice(0, 10) || null;
-
-  return raw;
+  return (
+    ep?.airdate ||
+    ep?.airstamp?.slice(0, 10) ||
+    ep?.show?.premiered ||
+    null
+  );
 }
 
 // =======================
@@ -156,7 +160,7 @@ function isBlockedLanguage(show) {
 }
 
 // =======================
-// TMDB LOOKUP
+// TMDB LOOKUP (UNCHANGED)
 // =======================
 async function findTmdbId(show) {
   let imdb = show?.externals?.imdb;
@@ -223,14 +227,16 @@ async function build() {
         if (!show?.id) continue;
 
         const epDate = getStrictEpisodeDate(ep);
-
         const windowHit = isInWindow(epDate);
 
+        // 🔥 DEBUG (only for your problem show)
         if (show.name?.toLowerCase().includes("blankety")) {
           console.log("\n=== BLANKETY RAW ===");
           console.log("Show:", show.name);
           console.log("EP:", ep.name);
-          console.log("DATE:", epDate);
+          console.log("RAW airdate:", ep?.airdate);
+          console.log("RAW airstamp:", ep?.airstamp);
+          console.log("EXTRACTED DATE:", epDate);
           console.log("WINDOW HIT:", windowHit);
         }
 
@@ -258,10 +264,6 @@ async function build() {
         }
 
         showMap.get(show.id).episodes.push(ep);
-
-        if (show.name?.toLowerCase().includes("blankety")) {
-          console.log("KEEP EP");
-        }
       }
     }
   }
@@ -279,9 +281,9 @@ async function build() {
   fs.mkdirSync(CATALOG_DIR, { recursive: true });
 
   for (const entry of showMap.values()) {
-    const show = entry.show;
-
     if (!entry.episodes.length) continue;
+
+    const show = entry.show;
 
     const tmdbId = await findTmdbId(show);
 
