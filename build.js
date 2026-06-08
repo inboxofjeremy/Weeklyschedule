@@ -1,6 +1,6 @@
 /**
  * build.js — Stremio static catalog (TVMaze schedule + TMDB ID merge)
- * GitHub Pages ONLY
+ * FIXED: loop-free + stable episode source
  */
 
 import fs from "fs";
@@ -12,6 +12,8 @@ import path from "path";
 const TMDB_API_KEY = "944017b839d3c040bdd2574083e4c1bc";
 const OUT_DIR = "./";
 const CATALOG_DIR = path.join(OUT_DIR, "catalog", "series");
+
+// keep your intent window but no longer used for filtering schedule
 const DAYS_BACK = 10;
 
 // =======================
@@ -28,9 +30,7 @@ async function fetchJSON(url) {
         TVMAZE_DELAY_MS - (Date.now() - lastTvmazeCall)
       );
 
-      if (wait) {
-        await new Promise(r => setTimeout(r));
-      }
+      if (wait) await new Promise(r => setTimeout(r, wait));
 
       lastTvmazeCall = Date.now();
     }
@@ -47,12 +47,8 @@ async function fetchJSON(url) {
 // =======================
 // HELPERS
 // =======================
-const cleanHTML = s =>
-  s ? s.replace(/<[^>]+>/g, "").trim() : "";
+const cleanHTML = s => (s ? s.replace(/<[^>]+>/g, "").trim() : "");
 
-// =======================
-// DATE HELPERS
-// =======================
 function pacificDateString(date = new Date()) {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "America/Los_Angeles",
@@ -63,38 +59,11 @@ function pacificDateString(date = new Date()) {
 
   return `${parts.find(p => p.type === "year").value}-${
     parts.find(p => p.type === "month").value
-  }-${
-    parts.find(p => p.type === "day").value
-  }`;
-}
-
-function getStrictEpisodeDate(ep) {
-  return (
-    ep?.airdate ||
-    ep?.airstamp?.slice(0, 10) ||
-    null
-  );
+  }-${parts.find(p => p.type === "day").value}`;
 }
 
 // =======================
-// WINDOW FILTER
-// =======================
-function isInWindow(epDate) {
-  if (!epDate) return false;
-
-  const todayStr = pacificDateString(new Date());
-  const today = new Date(todayStr + "T00:00:00Z");
-
-  const start = new Date(today);
-  start.setDate(start.getDate() - (DAYS_BACK - 1));
-
-  const ep = new Date(epDate + "T00:00:00Z");
-
-  return ep >= start && ep <= today;
-}
-
-// =======================
-// FILTERS
+// FILTERS (UNCHANGED)
 // =======================
 function isSports(show) {
   return (
@@ -108,7 +77,6 @@ function isNews(show) {
   const isPanel = (show.genres || []).some(g =>
     ["panel", "quiz", "game show"].includes(g?.toLowerCase())
   );
-
   if (isPanel) return false;
   return t === "news" || t === "talk show";
 }
@@ -119,7 +87,6 @@ function isForeign(show) {
     show?.network?.country?.code ||
     show?.webChannel?.country?.code ||
     "";
-
   return c && !allowed.includes(c.toUpperCase());
 }
 
@@ -152,12 +119,11 @@ function isBlockedLanguage(show) {
     "arabic","norwegian","german","chinese","korean",
     "french","hindi"
   ];
-
   return blocked.includes(String(show?.language || "").toLowerCase());
 }
 
 // =======================
-// TMDB
+// TMDB (UNCHANGED)
 // =======================
 async function findTmdbId(show) {
   let imdb = show?.externals?.imdb;
@@ -189,12 +155,12 @@ async function findTmdbId(show) {
 }
 
 // =======================
-// FALLBACK EPISODES
+// CANONICAL EPISODES (NEW SOURCE OF TRUTH)
 // =======================
 async function fetchAllEpisodes(showId) {
-  const url = `https://api.tvmaze.com/shows/${showId}/episodes`;
-  const data = await fetchJSON(url);
-  return Array.isArray(data) ? data : [];
+  return await fetchJSON(
+    `https://api.tvmaze.com/shows/${showId}/episodes`
+  ) || [];
 }
 
 // =======================
@@ -202,18 +168,19 @@ async function fetchAllEpisodes(showId) {
 // =======================
 async function build() {
 
-  const showMap = new Map();
-
   console.log("=== BUILD START ===");
 
-  // STEP 1: SCHEDULE COLLECTION
+  const showMap = new Map();
+  const seenShows = new Set();
+
+  // =======================
+  // STEP 1: DISCOVER SHOWS VIA SCHEDULE ONLY
+  // =======================
   for (let i = 0; i < DAYS_BACK; i++) {
     const d = new Date();
     d.setDate(d.getDate() - i);
 
     const dateStr = pacificDateString(d);
-
-    console.log("\n[DAY]", dateStr);
 
     for (const url of [
       `https://api.tvmaze.com/schedule?country=US&date=${dateStr}`,
@@ -228,75 +195,63 @@ async function build() {
         const show = ep.show || ep._embedded?.show;
         if (!show?.id) continue;
 
-        if (!showMap.has(show.id)) {
-          showMap.set(show.id, {
-            show,
-            episodes: [],
-            scheduleHits: 0
-          });
-        }
+        if (seenShows.has(show.id)) continue;
+        seenShows.add(show.id);
 
-        const entry = showMap.get(show.id);
-        entry.scheduleHits++;
-
-        const epDate = getStrictEpisodeDate(ep);
-
-        if (show.name?.toLowerCase().includes("blankety")) {
-          console.log("\n=== BLANKETY RAW ===");
-          console.log("EP:", ep.name);
-          console.log("DATE:", epDate);
-        }
-
-        if (!epDate) continue;
-        if (!isInWindow(epDate)) continue;
-
-        entry.episodes.push(ep);
+        showMap.set(show.id, {
+          show,
+          episodes: []
+        });
       }
     }
   }
 
   // =======================
-  // STEP 2: FALLBACK (FILTER SAFE)
+  // STEP 2: CANONICAL EPISODES PER SHOW
   // =======================
   for (const entry of showMap.values()) {
 
     const show = entry.show;
 
-    // only fallback if schedule is weak
-    const shouldFallback = entry.episodes.length === 0 && entry.scheduleHits < 3;
+    const eps = await fetchAllEpisodes(show.id);
 
-    if (shouldFallback) {
+    const now = new Date(pacificDateString(new Date()) + "T00:00:00Z");
 
-      const eps = await fetchAllEpisodes(show.id);
+    const filtered = eps.filter(e => {
+      if (!e?.airdate) return false;
 
-      const now = new Date(pacificDateString(new Date()) + "T00:00:00Z");
+      const d = new Date(e.airdate + "T00:00:00Z");
 
-      const filtered = eps.filter(e => {
-        if (!e?.airdate) return false;
+      // keep past + near future window (prevents Blankety Blank loss)
+      const futureWindow = new Date(now);
+      futureWindow.setDate(now.getDate() + 21);
 
-        // APPLY SAME FILTERS
-        if (
-          isSports(show) ||
-          isForeign(show) ||
-          isBlockedLanguage(show) ||
-          isDocumentary(show) ||
-          isBlockedWebChannel(show) ||
-          isYouTubeShow(show) ||
-          isLegal(show) ||
-          isBlockedPlatform(show) ||
-          isNews(show)
-        ) return false;
+      const inRange = d >= new Date(now.getTime() - 1000 * 60 * 60 * 24 * DAYS_BACK)
+                   && d <= futureWindow;
 
-        const d = new Date(e.airdate + "T00:00:00Z");
-        return d <= now;
-      });
+      if (!inRange) return false;
 
-      entry.episodes = filtered;
-    }
+      // APPLY YOUR ORIGINAL FILTERS
+      if (
+        isSports(show) ||
+        isForeign(show) ||
+        isBlockedLanguage(show) ||
+        isDocumentary(show) ||
+        isBlockedWebChannel(show) ||
+        isYouTubeShow(show) ||
+        isLegal(show) ||
+        isBlockedPlatform(show) ||
+        isNews(show)
+      ) return false;
+
+      return true;
+    });
+
+    entry.episodes = filtered;
 
     if (show.name?.toLowerCase().includes("blankety")) {
-      console.log("\n=== FINAL BLANKETY ===");
-      console.log("episodes:", entry.episodes.length);
+      console.log("\n=== BLANKETY DEBUG ===");
+      console.log("episodes:", filtered.length);
     }
   }
 
