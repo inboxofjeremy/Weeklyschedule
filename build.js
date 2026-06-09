@@ -31,7 +31,7 @@ function pacificDateString(date = new Date()) {
     timeZone: "America/Los_Angeles",
     year: "numeric", month: "2-digit", day: "2-digit"
   }).formatToParts(date);
-  return `${parts.find(p => p.type === "year").value}-${parts.find(p => p.type === "month").value}-${parts.find(p => p.type === "day").value}`;
+  return `${parts.find(p => p.type === "year").value}-${parts.find(p => p.month === "month")?.value || parts.find(p => p.type === "month").value}-${parts.find(p => p.type === "day").value}`;
 }
 
 // =======================
@@ -45,16 +45,20 @@ function isExcluded(show) {
   const webChannel = (show.webChannel?.name || "").toLowerCase();
   const network = (show.network?.name || "").toLowerCase();
 
-  // 1. FORCE INCLUDE
+  // 1. FORCE INCLUDE: Keep your specific show
   if (name.includes("blankety blank")) return false;
 
-  // 2. EXPLICIT BLOCKLIST: iQIYI and Non-English languages
-  if (webChannel === "iqiyi" || network === "iqiyi") {
-    console.log(`[FILTERED] "${show.name}" (Blocked WebChannel: iQIYI)`);
+  // 2. EXPLICIT BLOCKLIST: Platforms and Languages
+  const blockedWebChannels = ["iqiyi", "bilibili", "wavve"];
+  if (blockedWebChannels.includes(webChannel) || blockedWebChannels.includes(network)) {
+    console.log(`[FILTERED] "${show.name}" (Blocked WebChannel/Network)`);
     return true;
   }
   
-  const blockedLanguages = ["chinese", "japanese", "russian", "mandarin", "cantonese"];
+  const blockedLanguages = [
+    "chinese", "japanese", "russian", "mandarin", "cantonese", 
+    "korean", "hindi", "thai"
+  ];
   if (blockedLanguages.includes(lang)) {
     console.log(`[FILTERED] "${show.name}" (Blocked Language: ${lang})`);
     return true;
