@@ -34,12 +34,14 @@ function pacificDateString(date = new Date()) {
   return `${parts.find(p => p.type === "year").value}-${parts.find(p => p.type === "month").value}-${parts.find(p => p.type === "day").value}`;
 }
 
-function getStrictEpisodeDate(ep) { return ep?.airdate || ep?.airstamp?.slice(0, 10) || null; }
+function getStrictEpisodeDate(ep) {
+  // Priority: 1. airdate, 2. airstamp date, 3. fall back to null
+  return ep?.airdate || (ep?.airstamp ? ep.airstamp.slice(0, 10) : null);
+}
 
 function isInWindow(epDate, showName) {
   if (!epDate) return false;
-  const todayStr = pacificDateString(new Date());
-  const today = new Date(todayStr + "T00:00:00Z");
+  const today = new Date(pacificDateString(new Date()) + "T00:00:00Z");
   const start = new Date(today);
   start.setDate(start.getDate() - (DAYS_BACK - 1));
   const ep = new Date(epDate + "T00:00:00Z");
@@ -47,7 +49,7 @@ function isInWindow(epDate, showName) {
   const inWindow = ep >= start && ep <= today;
   
   if (showName?.toLowerCase().includes("blankety")) {
-    console.log(`[DATE DEBUG] ${showName} | EP: ${epDate} | Range: ${start.toISOString().slice(0,10)} to ${today.toISOString().slice(0,10)} | InWindow: ${inWindow}`);
+    console.log(`[DATE DEBUG] ${showName} | EP Date: ${epDate} | Range: ${start.toISOString().slice(0,10)} to ${today.toISOString().slice(0,10)} | InWindow: ${inWindow}`);
   }
   
   return inWindow;
@@ -87,10 +89,7 @@ function isExcluded(show) {
     { name: "Legal", fn: isLegal }, { name: "Language", fn: isBlockedLanguage }
   ];
   for (const check of checks) {
-    if (check.fn(show)) {
-      if (show.name?.toLowerCase().includes("blankety")) console.log(`[DEBUG] BLOCKED "${show.name}" by: ${check.name}`);
-      return true;
-    }
+    if (check.fn(show)) return true;
   }
   return false;
 }
@@ -126,19 +125,24 @@ async function build() {
       if (!Array.isArray(list)) continue;
       
       for (const ep of list) {
+        // USE THE EPISODE DATE DIRECTLY
+        const epDate = getStrictEpisodeDate(ep);
         const show = ep.show || ep._embedded?.show;
-        if (!show?.id) continue;
-        
+        if (!show?.id || !epDate) continue;
+
         if (show.name?.toLowerCase().includes("blankety")) {
-            console.log(`[DEBUG] Found in API: ${show.name} at ${url}`);
+            console.log(`[DEBUG] Found episode for ${show.name} at ${url}. Date: ${epDate}`);
         }
         
         if (isExcluded(show)) continue;
         
-        const epDate = getStrictEpisodeDate(ep);
         if (isInWindow(epDate, show.name)) {
             if (!showMap.has(show.id)) showMap.set(show.id, { show, episodes: [] });
-            showMap.get(show.id).episodes.push(ep);
+            const entry = showMap.get(show.id);
+            // Avoid adding same episode twice
+            if (!entry.episodes.find(e => e.id === ep.id)) {
+                entry.episodes.push(ep);
+            }
         }
       }
     }
@@ -151,7 +155,7 @@ async function build() {
     const stremioId = tmdbId ? `tmdb:${tmdbId}` : `tmdb:${900000000 + entry.show.id}`;
     metas.push({
       id: stremioId, type: "series", name: entry.show.name,
-      videos: entry.episodes.map(ep => ({ id: `${stremioId}:${ep.season}:${ep.number}`, title: ep.name }))
+      videos: entry.episodes.map(ep => ({ id: `${stremioId}:${ep.season || 0}:${ep.number || 0}`, title: ep.name || `Episode ${ep.number || 0}` }))
     });
   }
   
