@@ -36,13 +36,21 @@ function pacificDateString(date = new Date()) {
 
 function getStrictEpisodeDate(ep) { return ep?.airdate || ep?.airstamp?.slice(0, 10) || null; }
 
-function isInWindow(epDate) {
+function isInWindow(epDate, showName) {
   if (!epDate) return false;
-  const today = new Date(pacificDateString(new Date()) + "T00:00:00Z");
+  const todayStr = pacificDateString(new Date());
+  const today = new Date(todayStr + "T00:00:00Z");
   const start = new Date(today);
   start.setDate(start.getDate() - (DAYS_BACK - 1));
   const ep = new Date(epDate + "T00:00:00Z");
-  return ep >= start && ep <= today;
+  
+  const inWindow = ep >= start && ep <= today;
+  
+  if (showName?.toLowerCase().includes("blankety")) {
+    console.log(`[DATE DEBUG] ${showName} | EP: ${epDate} | Range: ${start.toISOString().slice(0,10)} to ${today.toISOString().slice(0,10)} | InWindow: ${inWindow}`);
+  }
+  
+  return inWindow;
 }
 
 // =======================
@@ -120,12 +128,15 @@ async function build() {
       for (const ep of list) {
         const show = ep.show || ep._embedded?.show;
         if (!show?.id) continue;
-        if (show.name?.toLowerCase().includes("blankety")) console.log(`[DEBUG] Found in API: ${show.name} at ${url}`);
+        
+        if (show.name?.toLowerCase().includes("blankety")) {
+            console.log(`[DEBUG] Found in API: ${show.name} at ${url}`);
+        }
         
         if (isExcluded(show)) continue;
         
         const epDate = getStrictEpisodeDate(ep);
-        if (epDate && isInWindow(epDate)) {
+        if (isInWindow(epDate, show.name)) {
             if (!showMap.has(show.id)) showMap.set(show.id, { show, episodes: [] });
             showMap.get(show.id).episodes.push(ep);
         }
