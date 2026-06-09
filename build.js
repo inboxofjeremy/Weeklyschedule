@@ -41,23 +41,30 @@ function isExcluded(show) {
   const name = (show.name || "").toLowerCase();
   const t = (show.type || "").toLowerCase();
   const genres = (show.genres || []).map(g => g.toLowerCase());
-  const c = show?.network?.country?.code || show?.webChannel?.country?.code || "unknown";
+  const lang = (show.language || "").toLowerCase();
+  const webChannel = (show.webChannel?.name || "").toLowerCase();
+  const network = (show.network?.name || "").toLowerCase();
 
-  // 1. FORCE INCLUDE
+  // 1. FORCE INCLUDE: Keep your specific show
   if (name.includes("blankety blank")) return false;
 
-  // 2. WHITESLIST: Explicitly allow specific genres
-  const allowedGenres = ["panel", "quiz", "game show", "game-show", "reality"];
-  if (genres.some(g => allowedGenres.includes(g)) || t === "reality") return false;
-
-  // 3. STRICT COUNTRY FILTER (Exclude foreign)
-  const allowedCountries = ["us", "gb", "ca", "au", "ie", "nz"];
-  if (c !== "unknown" && !allowedCountries.includes(c.toLowerCase())) {
-    console.log(`[FILTERED] "${show.name}" (Country: ${c})`);
+  // 2. EXPLICIT BLOCKLIST: iQIYI and Non-English languages
+  if (webChannel === "iqiyi" || network === "iqiyi") {
+    console.log(`[FILTERED] "${show.name}" (Blocked WebChannel: iQIYI)`);
+    return true;
+  }
+  
+  const blockedLanguages = ["chinese", "japanese", "russian", "mandarin", "cantonese"];
+  if (blockedLanguages.includes(lang)) {
+    console.log(`[FILTERED] "${show.name}" (Blocked Language: ${lang})`);
     return true;
   }
 
-  // 4. BLOCKLIST
+  // 3. WHITESLIST: Allow your preferred genres
+  const allowedGenres = ["panel", "quiz", "game show", "game-show", "reality"];
+  if (genres.some(g => allowedGenres.includes(g)) || t === "reality") return false;
+
+  // 4. BLOCKLIST (General)
   const isSports = t === "sports" || genres.includes("sports");
   const isNews = t === "news" || t === "talk show" || genres.includes("news");
   const isDoc = t === "documentary" || genres.includes("documentary");
@@ -104,8 +111,6 @@ async function build() {
         
         if (!isExcluded(show)) {
           activeShowIds.add(show.id);
-        } else if (show.name.toLowerCase().includes("blankety")) {
-          console.log(`[DEBUG] Blankety Blank was explicitly rejected by filter!`);
         }
       }
     }
