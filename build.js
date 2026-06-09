@@ -49,7 +49,9 @@ function isExcluded(show) {
   if (name.includes("blankety blank")) return false;
 
   // 2. EXPLICIT BLOCKLIST: Platforms and Languages
-  const blockedWebChannels = ["iqiyi", "bilibili", "wavve"];
+  const blockedWebChannels = [
+      "iqiyi", "bilibili", "wavve", "youku", "tencent qq", "vivaone"
+  ];
   if (blockedWebChannels.includes(webChannel) || blockedWebChannels.includes(network)) {
     console.log(`[FILTERED] "${show.name}" (Blocked WebChannel/Network)`);
     return true;
@@ -57,7 +59,7 @@ function isExcluded(show) {
   
   const blockedLanguages = [
     "chinese", "japanese", "russian", "mandarin", "cantonese", 
-    "korean", "hindi", "thai"
+    "korean", "hindi", "thai", "spanish", "norwegian"
   ];
   if (blockedLanguages.includes(lang)) {
     console.log(`[FILTERED] "${show.name}" (Blocked Language: ${lang})`);
