@@ -45,7 +45,7 @@ function isExcluded(show) {
   const webChannel = (show.webChannel?.name || "").toLowerCase();
   const network = (show.network?.name || "").toLowerCase();
 
-  // 1. FORCE INCLUDE: Keep your specific show
+  // 1. FORCE INCLUDE
   if (name.includes("blankety blank")) return false;
 
   // 2. EXPLICIT BLOCKLIST: iQIYI and Non-English languages
@@ -95,23 +95,32 @@ async function findTmdbId(show) {
 
 async function build() {
   const activeShowIds = new Set();
+  const countries = ["US", "GB", "CA", "AU", "NZ"];
+  
   console.log("=== BUILD START: Discovery Phase ===");
 
   for (let i = 0; i < DAYS_BACK; i++) {
     const d = new Date();
     d.setDate(d.getDate() - i);
     const dateStr = pacificDateString(d);
+    console.log(`[QUERY] Scanning date: ${dateStr}`);
     
-    for (const url of [`https://api.tvmaze.com/schedule?country=US&date=${dateStr}`, `https://api.tvmaze.com/schedule/web?date=${dateStr}`]) {
-      const list = await fetchJSON(url);
+    // 1. Scan specific country schedules
+    for (const country of countries) {
+      const list = await fetchJSON(`https://api.tvmaze.com/schedule?country=${country}&date=${dateStr}`);
       if (!Array.isArray(list)) continue;
       for (const ep of list) {
         const show = ep.show || ep._embedded?.show;
-        if (!show?.id) continue;
-        
-        if (!isExcluded(show)) {
-          activeShowIds.add(show.id);
-        }
+        if (show?.id && !isExcluded(show)) activeShowIds.add(show.id);
+      }
+    }
+
+    // 2. Scan Web schedule
+    const webList = await fetchJSON(`https://api.tvmaze.com/schedule/web?date=${dateStr}`);
+    if (Array.isArray(webList)) {
+      for (const ep of webList) {
+        const show = ep.show || ep._embedded?.show;
+        if (show?.id && !isExcluded(show)) activeShowIds.add(show.id);
       }
     }
   }
