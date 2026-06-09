@@ -153,9 +153,11 @@ function isBlockedLanguage(show) {
 }
 
 // =======================
-// TMDB FIXED (ONLY CHANGE)
+// TMDB FIX (FINAL STABLE VERSION)
 // =======================
 async function findTmdbId(show) {
+
+  // 1. ALWAYS try IMDb route first (most reliable)
   let imdb = show?.externals?.imdb;
 
   if (!imdb) {
@@ -172,15 +174,18 @@ async function findTmdbId(show) {
 
     const data = await fetchJSON(url);
 
-    const id = data?.tv_results?.[0]?.id;
+    if (data?.tv_results?.length) {
+      const id = data.tv_results[0].id;
 
-    if (show.name?.toLowerCase().includes("blankety")) {
-      console.log("[TMDB IMDB MATCH]", id);
+      if (show.name?.toLowerCase().includes("blankety")) {
+        console.log("[TMDB IMDb MATCH USED]", id);
+      }
+
+      return id;
     }
-
-    return id || null;
   }
 
+  // 2. fallback search
   const searchUrl =
     `https://api.themoviedb.org/3/search/tv` +
     `?api_key=${TMDB_API_KEY}` +
@@ -190,32 +195,40 @@ async function findTmdbId(show) {
 
   if (!search?.results?.length) return null;
 
-  const tvmazeYear = show?.premiered
-    ? new Date(show.premiered).getFullYear()
-    : null;
+  // 🧠 CRITICAL FIX: choose closest modern match, NOT index 0
+  const results = search.results;
 
-  let best = search.results.find(r => {
-    const y = r.first_air_date
-      ? new Date(r.first_air_date).getFullYear()
-      : null;
+  // prefer shows after 2000 first
+  let best =
+    results.find(r => (r.first_air_date || "").startsWith("20")) ||
+    null;
 
-    return tvmazeYear && y === tvmazeYear;
-  });
-
+  // then exact name + newest airdate
   if (!best) {
-    best = search.results.find(r =>
-      (r.name || "").toLowerCase() === show.name.toLowerCase()
-    );
+    const exact = results
+      .filter(r => (r.name || "").toLowerCase() === show.name.toLowerCase())
+      .sort((a, b) =>
+        new Date(b.first_air_date || 0) -
+        new Date(a.first_air_date || 0)
+      );
+
+    best = exact[0];
   }
 
-  if (!best) best = search.results[0];
+  // final fallback: newest overall (NOT index 0)
+  if (!best) {
+    best = results.sort((a, b) =>
+      new Date(b.first_air_date || 0) -
+      new Date(a.first_air_date || 0)
+    )[0];
+  }
 
   if (show.name?.toLowerCase().includes("blankety")) {
-    console.log("[TMDB SEARCH RESULTS]", search.results.map(r => ({
-      name: r.name,
-      year: r.first_air_date
-    })));
-    console.log("[TMDB SELECTED]", best?.name, best?.first_air_date);
+    console.log("[TMDB FINAL SELECTED]", {
+      name: best?.name,
+      date: best?.first_air_date,
+      id: best?.id
+    });
   }
 
   return best?.id || null;
@@ -254,13 +267,11 @@ async function build() {
         if (!showMap.has(show.id)) {
           showMap.set(show.id, {
             show,
-            episodes: [],
-            scheduleHits: 0
+            episodes: []
           });
         }
 
         const entry = showMap.get(show.id);
-        entry.scheduleHits++;
 
         const epDate = getStrictEpisodeDate(ep);
 
@@ -285,12 +296,6 @@ async function build() {
     const stremioId = tmdbId
       ? `tmdb:${tmdbId}`
       : `tmdb:${900000000 + show.id}`;
-
-    if (show.name?.toLowerCase().includes("blankety")) {
-      console.log("\n=== FINAL BLANKETY ===");
-      console.log("TMDB ID:", tmdbId);
-      console.log("episodes:", entry.episodes.length);
-    }
 
     if (!entry.episodes.length) continue;
 
