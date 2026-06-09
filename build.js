@@ -1,5 +1,5 @@
 /**
- * build.js — Stremio static catalog (Full Catalog for Recently Aired)
+ * build.js — Stremio static catalog
  */
 
 import fs from "fs";
@@ -37,35 +37,26 @@ function pacificDateString(date = new Date()) {
 // =======================
 // FILTERS
 // =======================
-function isSports(show) { return (show.type || "").toLowerCase() === "sports" || (show.genres || []).some(g => g?.toLowerCase() === "sports"); }
-
-function isNews(show) {
+function isExcluded(show) {
   const t = (show.type || "").toLowerCase();
   const genres = (show.genres || []).map(g => g.toLowerCase());
+  const lang = (show.language || "").toLowerCase();
 
-  // Whitelist: Explicitly allow these genres
-  const allowed = ["panel", "quiz", "game show", "game-show"];
-  if (genres.some(g => allowed.includes(g))) return false;
+  // 1. WHITESLIST: Always allow these regardless of other tags
+  const allowedGenres = ["panel", "quiz", "game show", "game-show", "reality"];
+  if (genres.some(g => allowedGenres.includes(g)) || t === "reality") {
+    return false; 
+  }
 
-  // Block only if explicitly News or Talk Show
-  return t === "news" || t === "talk show" || genres.includes("news");
-}
+  // 2. LANGUAGE FILTER: Block non-English (add others if needed)
+  if (lang && lang !== "english") return true;
 
-function isForeign(show) {
-  const allowed = ["US", "GB", "CA", "AU", "IE", "NZ"];
-  const c = show?.network?.country?.code || show?.webChannel?.country?.code;
-  if (!c) return false;
-  return !allowed.includes(c.toUpperCase());
-}
+  // 3. BLOCKLIST: Defined strictly
+  const isSports = t === "sports" || genres.includes("sports");
+  const isNews = t === "news" || t === "talk show" || genres.includes("news");
+  const isDoc = t === "documentary" || genres.includes("documentary");
 
-function isExcluded(show) {
-  const checks = [
-    { name: "Sports", fn: isSports }, 
-    { name: "News", fn: isNews }, 
-    { name: "Foreign", fn: isForeign },
-    { name: "Documentary", fn: (s) => (s.type || "").toLowerCase() === "documentary" || (s.genres || []).some(g => g?.toLowerCase() === "documentary") }
-  ];
-  return checks.some(c => c.fn(show));
+  return isSports || isNews || isDoc;
 }
 
 async function findTmdbId(show) {
@@ -92,9 +83,7 @@ async function build() {
     const d = new Date();
     d.setDate(d.getDate() - i);
     const dateStr = pacificDateString(d);
-    console.log(`[QUERY] Scanning date: ${dateStr}`);
-
-    // Fetching from both schedule and web to be comprehensive
+    
     for (const url of [`https://api.tvmaze.com/schedule?country=US&date=${dateStr}`, `https://api.tvmaze.com/schedule/web?date=${dateStr}`]) {
       const list = await fetchJSON(url);
       if (!Array.isArray(list)) continue;
@@ -107,7 +96,7 @@ async function build() {
     }
   }
 
-  console.log(`[INFO] Identified ${activeShowIds.size} active shows. Fetching full catalogs...`);
+  console.log(`[INFO] Identified ${activeShowIds.size} active shows. Fetching details...`);
   
   const metas = [];
   for (const showId of activeShowIds) {
