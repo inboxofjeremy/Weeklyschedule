@@ -1,5 +1,5 @@
 /**
- * build.js — Stremio static catalog (TVMaze schedule + TMDB ID merge)
+ * build.js — Stremio static catalog (Full Catalog for Recently Aired)
  */
 
 import fs from "fs";
@@ -8,7 +8,7 @@ import path from "path";
 const TMDB_API_KEY = "944017b839d3c040bdd2574083e4c1bc";
 const OUT_DIR = "./";
 const CATALOG_DIR = path.join(OUT_DIR, "catalog", "series");
-const DAYS_BACK = 10;
+const DAYS_BACK = 9;
 const TVMAZE_DELAY_MS = 150;
 let lastTvmazeCall = 0;
 
@@ -32,27 +32,6 @@ function pacificDateString(date = new Date()) {
     year: "numeric", month: "2-digit", day: "2-digit"
   }).formatToParts(date);
   return `${parts.find(p => p.type === "year").value}-${parts.find(p => p.type === "month").value}-${parts.find(p => p.type === "day").value}`;
-}
-
-function getStrictEpisodeDate(ep) {
-  // Priority: 1. airdate, 2. airstamp date, 3. fall back to null
-  return ep?.airdate || (ep?.airstamp ? ep.airstamp.slice(0, 10) : null);
-}
-
-function isInWindow(epDate, showName) {
-  if (!epDate) return false;
-  const today = new Date(pacificDateString(new Date()) + "T00:00:00Z");
-  const start = new Date(today);
-  start.setDate(start.getDate() - (DAYS_BACK - 1));
-  const ep = new Date(epDate + "T00:00:00Z");
-  
-  const inWindow = ep >= start && ep <= today;
-  
-  if (showName?.toLowerCase().includes("blankety")) {
-    console.log(`[DATE DEBUG] ${showName} | EP Date: ${epDate} | Range: ${start.toISOString().slice(0,10)} to ${today.toISOString().slice(0,10)} | InWindow: ${inWindow}`);
-  }
-  
-  return inWindow;
 }
 
 // =======================
@@ -88,10 +67,7 @@ function isExcluded(show) {
     { name: "Documentary", fn: isDocumentary }, { name: "BlockedPlatform", fn: isBlockedPlatform },
     { name: "Legal", fn: isLegal }, { name: "Language", fn: isBlockedLanguage }
   ];
-  for (const check of checks) {
-    if (check.fn(show)) return true;
-  }
-  return false;
+  return checks.some(c => c.fn(show));
 }
 
 async function findTmdbId(show) {
@@ -111,54 +87,55 @@ async function findTmdbId(show) {
 }
 
 async function build() {
-  const showMap = new Map();
-  console.log("=== BUILD START ===");
+  const activeShowIds = new Set();
+  console.log("=== BUILD START: Discovery Phase ===");
 
   for (let i = 0; i < DAYS_BACK; i++) {
     const d = new Date();
     d.setDate(d.getDate() - i);
     const dateStr = pacificDateString(d);
-    console.log(`[QUERY] Date: ${dateStr}`);
+    console.log(`[QUERY] Scanning date: ${dateStr}`);
 
-    for (const url of [`https://api.tvmaze.com/schedule?country=US&date=${dateStr}`, `https://api.tvmaze.com/schedule/web?date=${dateStr}`, `https://api.tvmaze.com/schedule/full?date=${dateStr}`]) {
+    for (const url of [`https://api.tvmaze.com/schedule?country=US&date=${dateStr}`, `https://api.tvmaze.com/schedule/web?date=${dateStr}`]) {
       const list = await fetchJSON(url);
       if (!Array.isArray(list)) continue;
-      
       for (const ep of list) {
-        // USE THE EPISODE DATE DIRECTLY
-        const epDate = getStrictEpisodeDate(ep);
         const show = ep.show || ep._embedded?.show;
-        if (!show?.id || !epDate) continue;
-
-        if (show.name?.toLowerCase().includes("blankety")) {
-            console.log(`[DEBUG] Found episode for ${show.name} at ${url}. Date: ${epDate}`);
-        }
-        
-        if (isExcluded(show)) continue;
-        
-        if (isInWindow(epDate, show.name)) {
-            if (!showMap.has(show.id)) showMap.set(show.id, { show, episodes: [] });
-            const entry = showMap.get(show.id);
-            // Avoid adding same episode twice
-            if (!entry.episodes.find(e => e.id === ep.id)) {
-                entry.episodes.push(ep);
-            }
+        if (show?.id && !isExcluded(show)) {
+          activeShowIds.add(show.id);
         }
       }
     }
   }
 
-  console.log(`[INFO] Shows collected: ${showMap.size}`);
+  console.log(`[INFO] Identified ${activeShowIds.size} active shows. Fetching full catalogs...`);
+  
   const metas = [];
-  for (const entry of showMap.values()) {
-    const tmdbId = await findTmdbId(entry.show);
-    const stremioId = tmdbId ? `tmdb:${tmdbId}` : `tmdb:${900000000 + entry.show.id}`;
+  for (const showId of activeShowIds) {
+    const showData = await fetchJSON(`https://api.tvmaze.com/shows/${showId}?embed=episodes`);
+    if (!showData) continue;
+
+    const tmdbId = await findTmdbId(showData);
+    const stremioId = tmdbId ? `tmdb:${tmdbId}` : `tmdb:${900000000 + showData.id}`;
+
     metas.push({
-      id: stremioId, type: "series", name: entry.show.name,
-      videos: entry.episodes.map(ep => ({ id: `${stremioId}:${ep.season || 0}:${ep.number || 0}`, title: ep.name || `Episode ${ep.number || 0}` }))
+      id: stremioId,
+      type: "series",
+      name: showData.name,
+      description: cleanHTML(showData.summary),
+      poster: showData.image?.original || showData.image?.medium || null,
+      background: showData.image?.original || null,
+      videos: (showData._embedded?.episodes || []).map(ep => ({
+        id: `${stremioId}:${ep.season || 0}:${ep.number || 0}`,
+        title: ep.name || `Episode ${ep.number || 0}`,
+        season: ep.season || 0,
+        episode: ep.number || 0,
+        released: ep.airdate || ep.airstamp?.slice(0, 10) || null,
+        overview: cleanHTML(ep.summary || "")
+      }))
     });
   }
-  
+
   fs.mkdirSync(CATALOG_DIR, { recursive: true });
   fs.writeFileSync(path.join(CATALOG_DIR, "tvmaze_weekly_schedule.json"), JSON.stringify({ metas }, null, 2));
   console.log("=== BUILD COMPLETE ===");
