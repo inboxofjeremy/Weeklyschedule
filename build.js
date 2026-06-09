@@ -38,34 +38,32 @@ function pacificDateString(date = new Date()) {
 // FILTERS
 // =======================
 function isSports(show) { return (show.type || "").toLowerCase() === "sports" || (show.genres || []).some(g => g?.toLowerCase() === "sports"); }
+
 function isNews(show) {
   const t = (show.type || "").toLowerCase();
   const genres = (show.genres || []).map(g => g.toLowerCase());
-  if (genres.includes("panel") || genres.includes("quiz") || genres.includes("game show")) return false;
-  return t === "news" || t === "talk show";
+
+  // Whitelist: Explicitly allow these genres
+  const allowed = ["panel", "quiz", "game show", "game-show"];
+  if (genres.some(g => allowed.includes(g))) return false;
+
+  // Block only if explicitly News or Talk Show
+  return t === "news" || t === "talk show" || genres.includes("news");
 }
+
 function isForeign(show) {
   const allowed = ["US", "GB", "CA", "AU", "IE", "NZ"];
   const c = show?.network?.country?.code || show?.webChannel?.country?.code;
   if (!c) return false;
   return !allowed.includes(c.toUpperCase());
 }
-function isBlockedWebChannel(show) { return (show?.webChannel?.name || "").toLowerCase() === "iqiyi"; }
-function isYouTubeShow(show) { return (show?.webChannel?.name || "").toLowerCase().includes("youtube"); }
-function isDocumentary(show) { return (show.type || "").toLowerCase() === "documentary" || (show.genres || []).some(g => g?.toLowerCase() === "documentary"); }
-function isBlockedPlatform(show) { return (show?.webChannel?.name || "").toLowerCase() === "tubi"; }
-function isLegal(show) { return (show.genres || []).some(g => g?.toLowerCase() === "legal"); }
-function isBlockedLanguage(show) {
-  const blocked = ["italian","turkish","indonesian","spanish","thai","arabic","norwegian","german","chinese","korean","french","hindi"];
-  return blocked.includes(String(show?.language || "").toLowerCase());
-}
 
 function isExcluded(show) {
   const checks = [
-    { name: "Sports", fn: isSports }, { name: "News", fn: isNews }, { name: "Foreign", fn: isForeign },
-    { name: "BlockedWeb", fn: isBlockedWebChannel }, { name: "YouTube", fn: isYouTubeShow },
-    { name: "Documentary", fn: isDocumentary }, { name: "BlockedPlatform", fn: isBlockedPlatform },
-    { name: "Legal", fn: isLegal }, { name: "Language", fn: isBlockedLanguage }
+    { name: "Sports", fn: isSports }, 
+    { name: "News", fn: isNews }, 
+    { name: "Foreign", fn: isForeign },
+    { name: "Documentary", fn: (s) => (s.type || "").toLowerCase() === "documentary" || (s.genres || []).some(g => g?.toLowerCase() === "documentary") }
   ];
   return checks.some(c => c.fn(show));
 }
@@ -96,6 +94,7 @@ async function build() {
     const dateStr = pacificDateString(d);
     console.log(`[QUERY] Scanning date: ${dateStr}`);
 
+    // Fetching from both schedule and web to be comprehensive
     for (const url of [`https://api.tvmaze.com/schedule?country=US&date=${dateStr}`, `https://api.tvmaze.com/schedule/web?date=${dateStr}`]) {
       const list = await fetchJSON(url);
       if (!Array.isArray(list)) continue;
