@@ -47,14 +47,16 @@ function isExcluded(show) {
 
   if (name.includes("blankety blank")) return false;
 
-  const blockedWebChannels = [
-      "iqiyi", "bilibili", "wavve", "youku", "tencent qq", "vivaone", "premier", "смотрим", "кион"
+  const blockedNetworks = [
+      "iqiyi", "bilibili", "wavve", "youku", "tencent qq", "vivaone", 
+      "premier", "смотрим", "кион", "geo entertainment", "tokyo mx"
   ];
-  if (blockedWebChannels.includes(webChannel) || blockedWebChannels.includes(network)) return true;
+  if (blockedNetworks.includes(webChannel) || blockedNetworks.includes(network)) return true;
   
   const blockedLanguages = [
     "chinese", "japanese", "russian", "mandarin", "cantonese", 
-    "korean", "hindi", "thai", "spanish", "norwegian", "hungarian", "dutch", "swedish", "portuguese"
+    "korean", "hindi", "thai", "spanish", "norwegian", "hungarian", 
+    "dutch", "swedish", "portuguese", "urdu", "turkish", "hebrew"
   ];
   if (blockedLanguages.includes(lang)) return true;
 
@@ -90,7 +92,7 @@ async function build() {
   
   console.log("=== BUILD START: Discovery Phase ===");
 
-  // 1. Schedule Scan (Primary Discovery)
+  // 1. Schedule Scan
   for (let i = 0; i < DAYS_BACK; i++) {
     const d = new Date();
     d.setDate(d.getDate() - i);
@@ -111,7 +113,7 @@ async function build() {
     });
   }
 
-  // 2. Activity Sync (Safety Net: Only add if there is a recent episode)
+  // 2. Activity Sync (Safety Net)
   console.log("[INFO] Running Activity Sync (Safety Net)...");
   const updates = await fetchJSON("https://api.tvmaze.com/updates/shows");
   if (updates) {
@@ -119,12 +121,10 @@ async function build() {
     const updatedIds = Object.keys(updates).filter(id => updates[id] > oneWeekAgo);
 
     for (const id of updatedIds) {
-      if (activeShowIds.has(parseInt(id))) continue; // Already added via Schedule
-
+      if (activeShowIds.has(parseInt(id))) continue;
       const show = await fetchJSON(`https://api.tvmaze.com/shows/${id}?embed=episodes`);
       if (!show || isExcluded(show)) continue;
 
-      // Ensure show actually has an episode within the 9-day window
       const now = Date.now();
       const hasRecentEpisode = show._embedded?.episodes?.some(ep => {
         const airDate = new Date(ep.airstamp || ep.airdate).getTime();
@@ -132,9 +132,7 @@ async function build() {
         return diffDays >= 0 && diffDays <= DAYS_BACK;
       });
 
-      if (hasRecentEpisode) {
-        activeShowIds.add(parseInt(id));
-      }
+      if (hasRecentEpisode) activeShowIds.add(parseInt(id));
     }
   }
 
