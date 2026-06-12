@@ -45,42 +45,27 @@ function isExcluded(show) {
   const webChannel = (show.webChannel?.name || "").toLowerCase();
   const network = (show.network?.name || "").toLowerCase();
 
-  // 1. FORCE INCLUDE: Keep your specific show
   if (name.includes("blankety blank")) return false;
 
-  // 2. EXPLICIT BLOCKLIST: Platforms and Languages
   const blockedWebChannels = [
       "iqiyi", "bilibili", "wavve", "youku", "tencent qq", "vivaone", "premier", "смотрим", "кион"
   ];
-  if (blockedWebChannels.includes(webChannel) || blockedWebChannels.includes(network)) {
-    console.log(`[FILTERED] "${show.name}" (Blocked WebChannel/Network: ${webChannel || network})`);
-    return true;
-  }
+  if (blockedWebChannels.includes(webChannel) || blockedWebChannels.includes(network)) return true;
   
   const blockedLanguages = [
     "chinese", "japanese", "russian", "mandarin", "cantonese", 
     "korean", "hindi", "thai", "spanish", "norwegian", "hungarian", "dutch", "swedish", "portuguese"
   ];
-  if (blockedLanguages.includes(lang)) {
-    console.log(`[FILTERED] "${show.name}" (Blocked Language: ${lang})`);
-    return true;
-  }
+  if (blockedLanguages.includes(lang)) return true;
 
-  // 3. WHITESLIST: Allow your preferred genres
   const allowedGenres = ["panel", "quiz", "game show", "game-show", "reality"];
   if (genres.some(g => allowedGenres.includes(g)) || t === "reality") return false;
 
-  // 4. BLOCKLIST (General)
   const isSports = t === "sports" || genres.includes("sports");
   const isNews = t === "news" || t === "talk show" || genres.includes("news");
   const isDoc = t === "documentary" || genres.includes("documentary");
 
-  if (isSports || isNews || isDoc) {
-    console.log(`[FILTERED] "${show.name}" (Type/Genre block)`);
-    return true;
-  }
-
-  return false;
+  return isSports || isNews || isDoc;
 }
 
 async function findTmdbId(show) {
@@ -105,38 +90,43 @@ async function build() {
   
   console.log("=== BUILD START: Discovery Phase ===");
 
+  // 1. Schedule Scan
   for (let i = 0; i < DAYS_BACK; i++) {
     const d = new Date();
     d.setDate(d.getDate() - i);
     const dateStr = pacificDateString(d);
-    console.log(`[QUERY] Scanning date: ${dateStr}`);
     
-    // 1. Scan specific country schedules
     for (const country of countries) {
       const list = await fetchJSON(`https://api.tvmaze.com/schedule?country=${country}&date=${dateStr}`);
-      if (!Array.isArray(list)) continue;
-      for (const ep of list) {
+      if (Array.isArray(list)) list.forEach(ep => {
         const show = ep.show || ep._embedded?.show;
         if (show?.id && !isExcluded(show)) activeShowIds.add(show.id);
-      }
+      });
     }
 
-    // 2. Scan Web schedule
     const webList = await fetchJSON(`https://api.tvmaze.com/schedule/web?date=${dateStr}`);
-    if (Array.isArray(webList)) {
-      for (const ep of webList) {
-        const show = ep.show || ep._embedded?.show;
-        if (show?.id && !isExcluded(show)) activeShowIds.add(show.id);
-      }
-    }
+    if (Array.isArray(webList)) webList.forEach(ep => {
+      const show = ep.show || ep._embedded?.show;
+      if (show?.id && !isExcluded(show)) activeShowIds.add(show.id);
+    });
   }
 
-  console.log(`[INFO] Identified ${activeShowIds.size} active shows. Fetching details...`);
+  // 2. Activity Sync (Safety Net for non-airing/updated shows)
+  console.log("[INFO] Running Activity Sync...");
+  const updates = await fetchJSON("https://api.tvmaze.com/updates/shows");
+  if (updates) {
+    const oneWeekAgo = Date.now() / 1000 - (7 * 24 * 60 * 60);
+    Object.keys(updates).forEach(id => {
+      if (updates[id] > oneWeekAgo) activeShowIds.add(parseInt(id));
+    });
+  }
+
+  console.log(`[INFO] Identified ${activeShowIds.size} potential shows. Filtering and fetching details...`);
   
   const metas = [];
   for (const showId of activeShowIds) {
     const showData = await fetchJSON(`https://api.tvmaze.com/shows/${showId}?embed=episodes`);
-    if (!showData) continue;
+    if (!showData || isExcluded(showData)) continue; // Filter again after full details
 
     const tmdbId = await findTmdbId(showData);
     const stremioId = tmdbId ? `tmdb:${tmdbId}` : `tmdb:${900000000 + showData.id}`;
