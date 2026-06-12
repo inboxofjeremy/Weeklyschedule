@@ -12,11 +12,8 @@ const DAYS_BACK = 9;
 const TVMAZE_DELAY_MS = 150;
 let lastTvmazeCall = 0;
 
-// Hardcoded overrides for shows that map to the wrong TMDB ID
 const TMDB_OVERRIDES = {
   // Add problematic TVMaze IDs here as: [tvmaze_id]: [tmdb_id]
-  // Example for The Floor (US): 
-  // 56355: 234567 
 };
 
 async function fetchJSON(url) {
@@ -38,7 +35,10 @@ function pacificDateString(date = new Date()) {
     timeZone: "America/Los_Angeles",
     year: "numeric", month: "2-digit", day: "2-digit"
   }).formatToParts(date);
-  return `${parts.find(p => p.type === "year").value}-${parts.find(p => p.month === "month")?.value || parts.find(p => p.type === "month").value}-${parts.find(p => p.day === "day").value}`;
+  
+  const map = {};
+  parts.forEach(p => { map[p.type] = p.value; });
+  return `${map.year}-${map.month}-${map.day}`;
 }
 
 // =======================
@@ -91,7 +91,6 @@ async function findTmdbId(show) {
   const search = await fetchJSON(`https://api.themoviedb.org/3/search/tv?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(show.name)}`);
   if (!search?.results?.length) return null;
 
-  // Filter for exact title match to avoid wrong-show collisions
   const matches = search.results.filter(r => r.name.toLowerCase() === show.name.toLowerCase());
   const best = matches.length > 0 ? matches[0] : search.results[0];
   
@@ -153,7 +152,6 @@ async function build() {
     const showData = await fetchJSON(`https://api.tvmaze.com/shows/${showId}?embed=episodes`);
     if (!showData || isExcluded(showData)) continue;
 
-    // Use override if exists, otherwise search
     const tmdbId = TMDB_OVERRIDES[showData.id] || await findTmdbId(showData);
     const stremioId = tmdbId ? `tmdb:${tmdbId}` : `tmdb:${900000000 + showData.id}`;
 
