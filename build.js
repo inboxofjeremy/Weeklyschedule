@@ -167,8 +167,8 @@ async function build() {
         title: ep.name || `Episode ${ep.number || 0}`,
         season: ep.season || 0,
         episode: ep.number || 0,
-        // Force the date to Noon UTC to prevent local timezone shifts
-        released: ep.airdate ? `${ep.airdate}T12:00:00Z` : (ep.airstamp ? ep.airstamp.split('T')[0] : null),
+        // Pure YYYY-MM-DD format to prevent timezone shifting in client apps
+        released: ep.airdate || (ep.airstamp ? ep.airstamp.split('T')[0] : null),
         overview: cleanHTML(ep.summary || "")
       }))
     });
