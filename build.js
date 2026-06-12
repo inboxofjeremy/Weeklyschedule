@@ -167,7 +167,8 @@ async function build() {
         title: ep.name || `Episode ${ep.number || 0}`,
         season: ep.season || 0,
         episode: ep.number || 0,
-        released: ep.airdate || ep.airstamp?.slice(0, 10) || null,
+        // Force the date format to be YYYY-MM-DD only
+        released: ep.airdate || (ep.airstamp ? ep.airstamp.split('T')[0] : null),
         overview: cleanHTML(ep.summary || "")
       }))
     });
