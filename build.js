@@ -146,21 +146,32 @@ async function build() {
     });
   }
 
-  // Sort the final catalog list by the most recent episode release date
-  metas.sort((a, b) => {
-    const getLatestDate = (show) => {
+  // 1. FILTER: Remove shows that haven't aired in the last DAYS_BACK days
+  const cutoffDate = new Date();
+  cutoffDate.setDate(cutoffDate.getDate() - DAYS_BACK);
+  const cutoffTs = cutoffDate.getTime();
+
+  const filteredMetas = metas.filter(show => {
+    return show.videos.some(ep => {
+      const epDate = ep.released ? new Date(ep.released).getTime() : 0;
+      return epDate >= cutoffTs;
+    });
+  });
+
+  // 2. SORT: Mathematical descending sort based on the latest episode
+  filteredMetas.sort((a, b) => {
+    const getLatestTimestamp = (show) => {
       const dates = (show.videos || [])
         .map(v => v.released)
-        .filter(d => d && d !== "");
-      return dates.length > 0 ? dates.sort().reverse()[0] : "0000-00-00";
+        .filter(d => d && typeof d === 'string' && d.includes('-'));
+      return dates.length > 0 ? new Date(dates.sort().reverse()[0]).getTime() : 0;
     };
-
-    return getLatestDate(b).localeCompare(getLatestDate(a));
+    return getLatestTimestamp(b) - getLatestTimestamp(a);
   });
 
   fs.mkdirSync(CATALOG_DIR, { recursive: true });
-  fs.writeFileSync(path.join(CATALOG_DIR, "tvmaze_weekly_schedule.json"), JSON.stringify({ metas }, null, 2));
-  console.log("=== BUILD COMPLETE ===");
+  fs.writeFileSync(path.join(CATALOG_DIR, "tvmaze_weekly_schedule.json"), JSON.stringify({ metas: filteredMetas }, null, 2));
+  console.log(`=== BUILD COMPLETE: ${filteredMetas.length} shows active in last ${DAYS_BACK} days ===`);
 }
 
 build().catch(err => { console.error(err); process.exit(1); });
