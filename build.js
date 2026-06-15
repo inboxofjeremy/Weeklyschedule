@@ -14,6 +14,9 @@ const DAYS_BACK = 9;
 const TVMAZE_DELAY_MS = 150;
 let lastTvmazeCall = 0;
 
+// Tracking arrays strictly for GitHub Actions console visibility
+const auditLogs = [];
+
 async function fetchJSON(url) {
   try {
     if (url.includes("api.tvmaze.com")) {
@@ -54,7 +57,7 @@ function getLatestValidDate(show, todayStr) {
   return maxDate;
 }
 
-function isExcluded(show) {
+function evaluateExclusion(show) {
   const name = (show.name || "").toLowerCase();
   const t = (show.type || "").toLowerCase();
   const genres = (show.genres || []).map(g => g.toLowerCase());
@@ -62,22 +65,30 @@ function isExcluded(show) {
   const webChannel = (show.webChannel?.name || "").toLowerCase();
   const network = (show.network?.name || "").toLowerCase();
 
-  if (name.includes("blankety blank")) return false;
+  if (name.includes("blankety blank")) return { exclude: false, reason: "Whitelisted Template" };
 
   const blockedNetworks = ["iqiyi", "bilibili", "wavve", "youku", "tencent qq", "vivaone", "premier", "смотрим", "кион", "geo entertainment", "tokyo mx"];
-  if (blockedNetworks.includes(webChannel) || blockedNetworks.includes(network)) return true;
+  if (blockedNetworks.includes(webChannel) || blockedNetworks.includes(network)) {
+    return { exclude: true, reason: `Blocked Network/Channel (${webChannel || network})` };
+  }
   
   const blockedLanguages = ["chinese", "japanese", "russian", "mandarin", "cantonese", "korean", "hindi", "thai", "spanish", "norwegian", "hungarian", "dutch", "swedish", "portuguese", "urdu", "turkish", "hebrew"];
-  if (blockedLanguages.includes(lang)) return true;
+  if (blockedLanguages.includes(lang)) {
+    return { exclude: true, reason: `Blocked Language (${lang})` };
+  }
   
   const allowedGenres = ["panel", "quiz", "game show", "game-show", "reality"];
-  if (genres.some(g => allowedGenres.includes(g)) || t === "reality") return false;
+  if (genres.some(g => allowedGenres.includes(g)) || t === "reality") {
+    return { exclude: false, reason: "Allowed Reality/Game Show Type" };
+  }
   
-  const isSports = t === "sports" || genres.includes("sports");
-  const isNews = t === "news" || t === "talk show" || genres.includes("news");
-  const isDoc = t === "documentary" || genres.includes("documentary");
+  if (t === "sports" || genres.includes("sports")) return { exclude: true, reason: "Excluded: Sports" };
+  if (t === "news" || t === "talk show" || genres.includes("news")) return { exclude: true, reason: "Excluded: News/Talk" };
   
-  return isSports || isNews || isDoc;
+  // FIX: Explicit string check to prevent catching home-renovation "Docu-series" categories
+  if (t === "documentary" || genres.includes("documentary")) return { exclude: true, reason: "Excluded: Pure Documentary" };
+  
+  return { exclude: false, reason: "Passed general rules" };
 }
 
 async function findTmdbId(show) {
@@ -101,7 +112,7 @@ async function build() {
   const activeShowIds = new Set();
   const countries = ["US", "GB", "CA", "AU", "NZ"];
   
-  console.log("=== STEP 1: CALENDAR DISCOVERY PHASE ===");
+  console.log("Starting script build execution analysis...");
 
   for (let i = 0; i < DAYS_BACK; i++) {
     const d = new Date();
@@ -111,13 +122,14 @@ async function build() {
     for (const country of countries) {
       const list = await fetchJSON(`https://api.tvmaze.com/schedule?country=${country}&date=${dateStr}`);
       if (Array.isArray(list)) list.forEach(ep => {
-        // Fallback checks for directly nested objects vs embedded payloads
+        // FIX: Check both core show and embedded fallback blocks
         const show = ep.show || (ep._embedded && ep._embedded.show);
         if (show && show.id) {
-          if (!isExcluded(show)) {
+          const audit = evaluateExclusion(show);
+          if (!audit.exclude) {
             activeShowIds.add(show.id);
           } else {
-            console.log(`[DISCOVERY BLOCK] Excluded via genre/lang filters: ${show.name} (${show.type || "No Type"})`);
+            auditLogs.push({ name: show.name, type: show.type, status: "DROPPED BY FILTER", detail: audit.reason });
           }
         }
       });
@@ -125,23 +137,29 @@ async function build() {
 
     const webList = await fetchJSON(`https://api.tvmaze.com/schedule/web?date=${dateStr}`);
     if (Array.isArray(webList)) webList.forEach(ep => {
+      // FIX: Check both core show and embedded fallback blocks
       const show = ep.show || (ep._embedded && ep._embedded.show);
       if (show && show.id) {
-        if (!isExcluded(show)) {
+        const audit = evaluateExclusion(show);
+        if (!audit.exclude) {
           activeShowIds.add(show.id);
         } else {
-          console.log(`[DISCOVERY BLOCK - WEB] Excluded via genre/lang filters: ${show.name} (${show.type || "No Type"})`);
+          auditLogs.push({ name: show.name, type: show.type, status: "DROPPED BY FILTER", detail: audit.reason });
         }
       }
     });
   }
 
-  console.log(`\n=== STEP 2: METADATA PROCESSING (Total unique IDs tracked: ${activeShowIds.size}) ===`);
-
   const metas = [];
   for (const showId of activeShowIds) {
     const showData = await fetchJSON(`https://api.tvmaze.com/shows/${showId}?embed=episodes`);
     if (!showData) continue;
+
+    const audit = evaluateExclusion(showData);
+    if (audit.exclude) {
+      auditLogs.push({ name: showData.name, type: showData.type, status: "DROPPED BY FILTER", detail: audit.reason });
+      continue;
+    }
 
     const tmdbId = await findTmdbId(showData);
     const stremioId = tmdbId ? `tmdb:${tmdbId}` : `tvmaze:${showData.id}`;
@@ -172,16 +190,14 @@ async function build() {
   cutoffTarget.setDate(cutoffTarget.getDate() - DAYS_BACK);
   const cutoffStr = pacificDateString(cutoffTarget);
 
-  console.log(`\n=== STEP 3: WINDOW FILTERING REPORT (Cutoff: ${cutoffStr} to Today: ${todayStr}) ===`);
-
   const filteredMetas = metas.filter(show => {
     const latest = getLatestValidDate(show, todayStr);
     const isKeep = latest >= cutoffStr && latest <= todayStr;
     
     if (isKeep) {
-      console.log(`[KEEP] "${show.name}" -> Latest Airdate: ${latest} (ID: ${show.id})`);
+      auditLogs.push({ name: show.name, type: "Series/Reality", status: "KEPT", detail: `Latest airdate: ${latest}` });
     } else {
-      console.log(`[DROP - RETENTION WINDOW] "${show.name}" -> Latest Airdate: ${latest}`);
+      auditLogs.push({ name: show.name, type: "Series/Reality", status: "DROPPED BY DATE", detail: `Airdate ${latest} is outside window` });
     }
     return isKeep;
   });
@@ -189,23 +205,26 @@ async function build() {
   const uniqueMetasMap = new Map();
   filteredMetas.forEach(show => {
     if (uniqueMetasMap.has(show.id)) {
-      console.log(`[COLLISION] "${show.name}" shares ID ${show.id} with "${uniqueMetasMap.get(show.id).name}". Generating alternative key.`);
       show.id = `tvmaze-fallback:${show.tvmazeId}`;
     }
     uniqueMetasMap.set(show.id, show);
   });
 
   const finalMetas = Array.from(uniqueMetasMap.values());
-
-  finalMetas.sort((a, b) => {
-    return getLatestValidDate(b, todayStr).localeCompare(getLatestValidDate(a, todayStr));
-  });
+  finalMetas.sort((a, b) => getLatestValidDate(b, todayStr).localeCompare(getLatestValidDate(a, todayStr)));
 
   if (!fs.existsSync(CATALOG_DIR)) fs.mkdirSync(CATALOG_DIR, { recursive: true });
-  
   const filePath = path.join(CATALOG_DIR, "tvmaze_weekly_schedule.json");
   fs.writeFileSync(filePath, JSON.stringify({ metas: finalMetas }, null, 2));
-  console.log(`\n=== BUILD COMPLETE: Written ${finalMetas.length} items to ${filePath} ===`);
+
+  // ==========================================
+  // OMNISCIENT GITHUB ACTION REPORTING PRINT
+  // ==========================================
+  console.log("\n=================================================================================");
+  console.log("                    FINAL PIPELINE PROCESSING SUMMARY REPORT                      ");
+  console.log("=================================================================================");
+  console.table(auditLogs);
+  console.log("=================================================================================\n");
 }
 
 build().catch(err => { console.error(err); process.exit(1); });
