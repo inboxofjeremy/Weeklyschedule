@@ -41,12 +41,17 @@ function pacificDateString(date = new Date()) {
   return `${map.year}-${map.month}-${map.day}`;
 }
 
-// Fixed to only consider episodes up to TODAY (June 15th)
+// Safely extracts the absolute latest date string that is <= today
 function getLatestValidDate(show, todayStr) {
-  const dates = (show.videos || [])
-    .map(v => v.released)
-    .filter(d => d && typeof d === 'string' && d.includes('-') && d <= todayStr);
-  return dates.length > 0 ? dates.sort().reverse()[0] : "0000-00-00";
+  if (!show.videos || show.videos.length === 0) return "0000-00-00";
+  
+  return show.videos.reduce((latest, v) => {
+    const d = v.released;
+    if (d && typeof d === 'string' && d.includes('-') && d <= todayStr) {
+      return d > latest ? d : latest;
+    }
+    return latest;
+  }, "0000-00-00");
 }
 
 function isExcluded(show) {
@@ -58,15 +63,20 @@ function isExcluded(show) {
   const network = (show.network?.name || "").toLowerCase();
 
   if (name.includes("blankety blank")) return false;
+
   const blockedNetworks = ["iqiyi", "bilibili", "wavve", "youku", "tencent qq", "vivaone", "premier", "смотрим", "кион", "geo entertainment", "tokyo mx"];
   if (blockedNetworks.includes(webChannel) || blockedNetworks.includes(network)) return true;
+  
   const blockedLanguages = ["chinese", "japanese", "russian", "mandarin", "cantonese", "korean", "hindi", "thai", "spanish", "norwegian", "hungarian", "dutch", "swedish", "portuguese", "urdu", "turkish", "hebrew"];
   if (blockedLanguages.includes(lang)) return true;
+  
   const allowedGenres = ["panel", "quiz", "game show", "game-show", "reality"];
   if (genres.some(g => allowedGenres.includes(g)) || t === "reality") return false;
+  
   const isSports = t === "sports" || genres.includes("sports");
   const isNews = t === "news" || t === "talk show" || genres.includes("news");
   const isDoc = t === "documentary" || genres.includes("documentary");
+  
   return isSports || isNews || isDoc;
 }
 
@@ -147,7 +157,7 @@ async function build() {
   cutoffTarget.setDate(cutoffTarget.getDate() - DAYS_BACK);
   const cutoffStr = pacificDateString(cutoffTarget);
 
-  // Filter and sort securely against the runtime's Pacific date parameters
+  // Filter and sort cleanly using the string-based reduce method
   const filteredMetas = metas
     .filter(show => {
       const latest = getLatestValidDate(show, todayStr);
