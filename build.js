@@ -14,7 +14,11 @@ const DAYS_BACK = 9;
 const TVMAZE_DELAY_MS = 150;
 let lastTvmazeCall = 0;
 
-const TMDB_OVERRIDES = {};
+// Hardcoded manual overrides to force perfect ID matching when TMDB search fails
+const TMDB_OVERRIDES = {
+  // If Zombie House Flipping has a specific TVMaze ID, map it directly here to prevent collapsing:
+  // "TVMAZE_ID": TMDB_ID
+};
 
 async function fetchJSON(url) {
   try {
@@ -41,7 +45,6 @@ function pacificDateString(date = new Date()) {
   return `${map.year}-${map.month}-${map.day}`;
 }
 
-// Fixed calculation to pull maximum valid date string strictly less than or equal to today
 function getLatestValidDate(show, todayStr) {
   let maxDate = "0000-00-00";
   if (!show.videos) return maxDate;
@@ -126,16 +129,24 @@ async function build() {
     });
   }
 
+  console.log(`[INFO] Found ${activeShowIds.size} potential raw show IDs. Processing details...`);
+
   const metas = [];
   for (const showId of activeShowIds) {
     const showData = await fetchJSON(`https://api.tvmaze.com/shows/${showId}?embed=episodes`);
-    if (!showData || isExcluded(showData)) continue;
+    if (!showData) continue;
+    if (isExcluded(showData)) {
+      console.log(`[EXCLUDED - GENRE/LANG] ${showData.name}`);
+      continue;
+    }
 
     const tmdbId = TMDB_OVERRIDES[showData.id] || await findTmdbId(showData);
-    const stremioId = tmdbId ? `tmdb:${tmdbId}` : `tmdb:${900000000 + showData.id}`;
+    // Fallback ID generation modified to prevent matching collisions
+    const stremioId = tmdbId ? `tmdb:${tmdbId}` : `tvmaze:${showData.id}`;
 
     metas.push({
       id: stremioId,
+      tvmazeId: showData.id, // Stored for debugging validation
       type: "series",
       name: showData.name,
       description: cleanHTML(showData.summary),
@@ -155,25 +166,46 @@ async function build() {
   }
 
   const todayStr = pacificDateString(new Date());
-
   const cutoffTarget = new Date();
   cutoffTarget.setDate(cutoffTarget.getDate() - DAYS_BACK);
   const cutoffStr = pacificDateString(cutoffTarget);
 
-  const filteredMetas = metas
-    .filter(show => {
-      const latest = getLatestValidDate(show, todayStr);
-      return latest >= cutoffStr && latest <= todayStr;
-    })
-    .sort((a, b) => {
-      return getLatestValidDate(b, todayStr).localeCompare(getLatestValidDate(a, todayStr));
-    });
+  console.log(`\n=== DATE FILTERING REPORT (Cutoff: ${cutoffStr} to Today: ${todayStr}) ===`);
+
+  const filteredMetas = metas.filter(show => {
+    const latest = getLatestValidDate(show, todayStr);
+    const isKeep = latest >= cutoffStr && latest <= todayStr;
+    
+    if (isKeep) {
+      console.log(`[KEEP] "${show.name}" -> Latest Episode: ${latest} (ID: ${show.id})`);
+    } else {
+      console.log(`[DROP - OUTSIDE WINDOW] "${show.name}" -> Latest Episode: ${latest}`);
+    }
+    return isKeep;
+  });
+
+  // Handle unique ID collisions explicitly before sorting
+  const uniqueMetasMap = new Map();
+  filteredMetas.forEach(show => {
+    if (uniqueMetasMap.has(show.id)) {
+      console.log(`[WARNING - ID COLLISION DETECTED] "${show.name}" shares an ID (${show.id}) with "${uniqueMetasMap.get(show.id).name}". Assigning alternative ID to prevent disappearance.`);
+      show.id = `tvmaze-fallback:${show.tvmazeId}`;
+    }
+    uniqueMetasMap.set(show.id, show);
+  });
+
+  const finalMetas = Array.from(uniqueMetasMap.values());
+
+  // Final descending sort
+  finalMetas.sort((a, b) => {
+    return getLatestValidDate(b, todayStr).localeCompare(getLatestValidDate(a, todayStr));
+  });
 
   if (!fs.existsSync(CATALOG_DIR)) fs.mkdirSync(CATALOG_DIR, { recursive: true });
   
   const filePath = path.join(CATALOG_DIR, "tvmaze_weekly_schedule.json");
-  fs.writeFileSync(filePath, JSON.stringify({ metas: filteredMetas }, null, 2));
-  console.log(`=== BUILD COMPLETE: Written to ${filePath} ===`);
+  fs.writeFileSync(filePath, JSON.stringify({ metas: finalMetas }, null, 2));
+  console.log(`\n=== BUILD COMPLETE: Written ${finalMetas.length} shows to ${filePath} ===`);
 }
 
 build().catch(err => { console.error(err); process.exit(1); });
