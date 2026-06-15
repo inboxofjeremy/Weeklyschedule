@@ -14,12 +14,6 @@ const DAYS_BACK = 9;
 const TVMAZE_DELAY_MS = 150;
 let lastTvmazeCall = 0;
 
-// Hardcoded manual overrides to force perfect ID matching when TMDB search fails
-const TMDB_OVERRIDES = {
-  // If Zombie House Flipping has a specific TVMaze ID, map it directly here to prevent collapsing:
-  // "TVMAZE_ID": TMDB_ID
-};
-
 async function fetchJSON(url) {
   try {
     if (url.includes("api.tvmaze.com")) {
@@ -107,7 +101,7 @@ async function build() {
   const activeShowIds = new Set();
   const countries = ["US", "GB", "CA", "AU", "NZ"];
   
-  console.log("=== BUILD START: Discovery Phase ===");
+  console.log("=== STEP 1: CALENDAR DISCOVERY PHASE ===");
 
   for (let i = 0; i < DAYS_BACK; i++) {
     const d = new Date();
@@ -117,36 +111,44 @@ async function build() {
     for (const country of countries) {
       const list = await fetchJSON(`https://api.tvmaze.com/schedule?country=${country}&date=${dateStr}`);
       if (Array.isArray(list)) list.forEach(ep => {
-        const show = ep.show || ep._embedded?.show;
-        if (show?.id && !isExcluded(show)) activeShowIds.add(show.id);
+        // Fallback checks for directly nested objects vs embedded payloads
+        const show = ep.show || (ep._embedded && ep._embedded.show);
+        if (show && show.id) {
+          if (!isExcluded(show)) {
+            activeShowIds.add(show.id);
+          } else {
+            console.log(`[DISCOVERY BLOCK] Excluded via genre/lang filters: ${show.name} (${show.type || "No Type"})`);
+          }
+        }
       });
     }
 
     const webList = await fetchJSON(`https://api.tvmaze.com/schedule/web?date=${dateStr}`);
     if (Array.isArray(webList)) webList.forEach(ep => {
-      const show = ep.show || ep._embedded?.show;
-      if (show?.id && !isExcluded(show)) activeShowIds.add(show.id);
+      const show = ep.show || (ep._embedded && ep._embedded.show);
+      if (show && show.id) {
+        if (!isExcluded(show)) {
+          activeShowIds.add(show.id);
+        } else {
+          console.log(`[DISCOVERY BLOCK - WEB] Excluded via genre/lang filters: ${show.name} (${show.type || "No Type"})`);
+        }
+      }
     });
   }
 
-  console.log(`[INFO] Found ${activeShowIds.size} potential raw show IDs. Processing details...`);
+  console.log(`\n=== STEP 2: METADATA PROCESSING (Total unique IDs tracked: ${activeShowIds.size}) ===`);
 
   const metas = [];
   for (const showId of activeShowIds) {
     const showData = await fetchJSON(`https://api.tvmaze.com/shows/${showId}?embed=episodes`);
     if (!showData) continue;
-    if (isExcluded(showData)) {
-      console.log(`[EXCLUDED - GENRE/LANG] ${showData.name}`);
-      continue;
-    }
 
-    const tmdbId = TMDB_OVERRIDES[showData.id] || await findTmdbId(showData);
-    // Fallback ID generation modified to prevent matching collisions
+    const tmdbId = await findTmdbId(showData);
     const stremioId = tmdbId ? `tmdb:${tmdbId}` : `tvmaze:${showData.id}`;
 
     metas.push({
       id: stremioId,
-      tvmazeId: showData.id, // Stored for debugging validation
+      tvmazeId: showData.id,
       type: "series",
       name: showData.name,
       description: cleanHTML(showData.summary),
@@ -170,25 +172,24 @@ async function build() {
   cutoffTarget.setDate(cutoffTarget.getDate() - DAYS_BACK);
   const cutoffStr = pacificDateString(cutoffTarget);
 
-  console.log(`\n=== DATE FILTERING REPORT (Cutoff: ${cutoffStr} to Today: ${todayStr}) ===`);
+  console.log(`\n=== STEP 3: WINDOW FILTERING REPORT (Cutoff: ${cutoffStr} to Today: ${todayStr}) ===`);
 
   const filteredMetas = metas.filter(show => {
     const latest = getLatestValidDate(show, todayStr);
     const isKeep = latest >= cutoffStr && latest <= todayStr;
     
     if (isKeep) {
-      console.log(`[KEEP] "${show.name}" -> Latest Episode: ${latest} (ID: ${show.id})`);
+      console.log(`[KEEP] "${show.name}" -> Latest Airdate: ${latest} (ID: ${show.id})`);
     } else {
-      console.log(`[DROP - OUTSIDE WINDOW] "${show.name}" -> Latest Episode: ${latest}`);
+      console.log(`[DROP - RETENTION WINDOW] "${show.name}" -> Latest Airdate: ${latest}`);
     }
     return isKeep;
   });
 
-  // Handle unique ID collisions explicitly before sorting
   const uniqueMetasMap = new Map();
   filteredMetas.forEach(show => {
     if (uniqueMetasMap.has(show.id)) {
-      console.log(`[WARNING - ID COLLISION DETECTED] "${show.name}" shares an ID (${show.id}) with "${uniqueMetasMap.get(show.id).name}". Assigning alternative ID to prevent disappearance.`);
+      console.log(`[COLLISION] "${show.name}" shares ID ${show.id} with "${uniqueMetasMap.get(show.id).name}". Generating alternative key.`);
       show.id = `tvmaze-fallback:${show.tvmazeId}`;
     }
     uniqueMetasMap.set(show.id, show);
@@ -196,7 +197,6 @@ async function build() {
 
   const finalMetas = Array.from(uniqueMetasMap.values());
 
-  // Final descending sort
   finalMetas.sort((a, b) => {
     return getLatestValidDate(b, todayStr).localeCompare(getLatestValidDate(a, todayStr));
   });
@@ -205,7 +205,7 @@ async function build() {
   
   const filePath = path.join(CATALOG_DIR, "tvmaze_weekly_schedule.json");
   fs.writeFileSync(filePath, JSON.stringify({ metas: finalMetas }, null, 2));
-  console.log(`\n=== BUILD COMPLETE: Written ${finalMetas.length} shows to ${filePath} ===`);
+  console.log(`\n=== BUILD COMPLETE: Written ${finalMetas.length} items to ${filePath} ===`);
 }
 
 build().catch(err => { console.error(err); process.exit(1); });
