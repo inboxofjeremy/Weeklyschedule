@@ -12,9 +12,7 @@ const DAYS_BACK = 9;
 const TVMAZE_DELAY_MS = 150;
 let lastTvmazeCall = 0;
 
-const TMDB_OVERRIDES = {
-  // Add problematic TVMaze IDs here as: [tvmaze_id]: [tmdb_id]
-};
+const TMDB_OVERRIDES = {};
 
 async function fetchJSON(url) {
   try {
@@ -41,9 +39,6 @@ function pacificDateString(date = new Date()) {
   return `${map.year}-${map.month}-${map.day}`;
 }
 
-// =======================
-// FILTERS
-// =======================
 function isExcluded(show) {
   const name = (show.name || "").toLowerCase();
   const t = (show.type || "").toLowerCase();
@@ -123,30 +118,6 @@ async function build() {
     });
   }
 
-  console.log("[INFO] Running Activity Sync (Safety Net)...");
-  const updates = await fetchJSON("https://api.tvmaze.com/updates/shows");
-  if (updates) {
-    const oneWeekAgo = Date.now() / 1000 - (7 * 24 * 60 * 60);
-    const updatedIds = Object.keys(updates).filter(id => updates[id] > oneWeekAgo);
-
-    for (const id of updatedIds) {
-      if (activeShowIds.has(parseInt(id))) continue;
-      const show = await fetchJSON(`https://api.tvmaze.com/shows/${id}?embed=episodes`);
-      if (!show || isExcluded(show)) continue;
-
-      const now = Date.now();
-      const hasRecentEpisode = show._embedded?.episodes?.some(ep => {
-        const airDate = new Date(ep.airstamp || ep.airdate).getTime();
-        const diffDays = (now - airDate) / (1000 * 60 * 60 * 24);
-        return diffDays >= 0 && diffDays <= DAYS_BACK;
-      });
-
-      if (hasRecentEpisode) activeShowIds.add(parseInt(id));
-    }
-  }
-
-  console.log(`[INFO] Identified ${activeShowIds.size} shows. Fetching details...`);
-  
   const metas = [];
   for (const showId of activeShowIds) {
     const showData = await fetchJSON(`https://api.tvmaze.com/shows/${showId}?embed=episodes`);
@@ -162,17 +133,26 @@ async function build() {
       description: cleanHTML(showData.summary),
       poster: showData.image?.original || showData.image?.medium || null,
       background: showData.image?.original || null,
-      videos: (showData._embedded?.episodes || []).map(ep => ({
-        id: `${stremioId}:${ep.season || 0}:${ep.number || 0}`,
-        title: ep.name || `Episode ${ep.number || 0}`,
-        season: ep.season || 0,
-        episode: ep.number || 0,
-        // Pure YYYY-MM-DD format to prevent timezone shifting in client apps
-        released: ep.airdate || (ep.airstamp ? ep.airstamp.split('T')[0] : null),
-        overview: cleanHTML(ep.summary || "")
-      }))
+      // Sort episodes chronologically
+      videos: (showData._embedded?.episodes || [])
+        .sort((a, b) => (a.season - b.season) || (a.number - b.number))
+        .map(ep => ({
+          id: `${stremioId}:${ep.season || 0}:${ep.number || 0}`,
+          title: ep.name || `Episode ${ep.number || 0}`,
+          season: ep.season || 0,
+          episode: ep.number || 0,
+          released: ep.airdate || (ep.airstamp ? ep.airstamp.split('T')[0] : null),
+          overview: cleanHTML(ep.summary || "")
+        }))
     });
   }
+
+  // Sort the final catalog list by the date of the most recent episode (newest first)
+  metas.sort((a, b) => {
+    const lastA = a.videos.length > 0 ? a.videos[a.videos.length - 1].released : "";
+    const lastB = b.videos.length > 0 ? b.videos[b.videos.length - 1].released : "";
+    return lastB.localeCompare(lastA);
+  });
 
   fs.mkdirSync(CATALOG_DIR, { recursive: true });
   fs.writeFileSync(path.join(CATALOG_DIR, "tvmaze_weekly_schedule.json"), JSON.stringify({ metas }, null, 2));
