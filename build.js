@@ -147,11 +147,11 @@ async function build() {
     });
   }
 
-  // Sort the final catalog list by the date of the most recent episode (newest first)
+  // Sort the final catalog list safely by the date of the most recent episode
   metas.sort((a, b) => {
-    const lastA = a.videos.length > 0 ? a.videos[a.videos.length - 1].released : "";
-    const lastB = b.videos.length > 0 ? b.videos[b.videos.length - 1].released : "";
-    return lastB.localeCompare(lastA);
+    const lastA = (a.videos && a.videos.length > 0) ? a.videos[a.videos.length - 1].released : "";
+    const lastB = (b.videos && b.videos.length > 0) ? b.videos[b.videos.length - 1].released : "";
+    return (lastB || "").localeCompare(lastA || "");
   });
 
   fs.mkdirSync(CATALOG_DIR, { recursive: true });
