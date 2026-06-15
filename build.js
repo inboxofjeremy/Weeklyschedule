@@ -41,17 +41,20 @@ function pacificDateString(date = new Date()) {
   return `${map.year}-${map.month}-${map.day}`;
 }
 
-// Safely extracts the absolute latest date string that is <= today
+// Fixed calculation to pull maximum valid date string strictly less than or equal to today
 function getLatestValidDate(show, todayStr) {
-  if (!show.videos || show.videos.length === 0) return "0000-00-00";
+  let maxDate = "0000-00-00";
+  if (!show.videos) return maxDate;
   
-  return show.videos.reduce((latest, v) => {
-    const d = v.released;
+  for (let i = 0; i < show.videos.length; i++) {
+    const d = show.videos[i].released;
     if (d && typeof d === 'string' && d.includes('-') && d <= todayStr) {
-      return d > latest ? d : latest;
+      if (d > maxDate) {
+        maxDate = d;
+      }
     }
-    return latest;
-  }, "0000-00-00");
+  }
+  return maxDate;
 }
 
 function isExcluded(show) {
@@ -157,7 +160,6 @@ async function build() {
   cutoffTarget.setDate(cutoffTarget.getDate() - DAYS_BACK);
   const cutoffStr = pacificDateString(cutoffTarget);
 
-  // Filter and sort cleanly using the string-based reduce method
   const filteredMetas = metas
     .filter(show => {
       const latest = getLatestValidDate(show, todayStr);
