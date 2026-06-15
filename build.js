@@ -10,7 +10,10 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TMDB_API_KEY = "944017b839d3c040bdd2574083e4c1bc";
 
 const CATALOG_DIR = path.join(__dirname, "catalog", "series");
-const DAYS_BACK = 9;
+// FIXED: Expanded search buffer to capture timezone boundary shifts across networks
+const DISCOVERY_DAYS_BACK = 12; 
+const RETENTION_DAYS_BACK = 9;
+
 const TVMAZE_DELAY_MS = 150;
 let lastTvmazeCall = 0;
 
@@ -78,13 +81,11 @@ function evaluateExclusion(show) {
   
   const allowedGenres = ["panel", "quiz", "game show", "game-show", "reality"];
   if (genres.some(g => allowedGenres.includes(g)) || t === "reality") {
-    return { exclude: false, reason: "Allowed Variety/Reality" };
+    return { exclude: false, reason: "Allowed Reality/Variety" };
   }
   
   if (t === "sports" || genres.includes("sports")) return { exclude: true, reason: "Excluded: Sports" };
   if (t === "news" || t === "talk show" || genres.includes("news")) return { exclude: true, reason: "Excluded: News/Talk" };
-  
-  // FIXED: Explicit structural matching prevents dropping "Docu-series" reality blocks
   if (t === "documentary" || genres.includes("documentary")) {
     return { exclude: true, reason: "Excluded: Pure Documentary" };
   }
@@ -112,9 +113,10 @@ async function build() {
   const activeShowIds = new Set();
   const countries = ["US", "GB", "CA", "AU", "NZ"];
   
-  console.log("Beginning automated schedule analysis...");
+  console.log("Beginning automated schedule analysis with timezone correction...");
 
-  for (let i = 0; i < DAYS_BACK; i++) {
+  // Broad scan to catch global timezone alignment errors
+  for (let i = 0; i < DISCOVERY_DAYS_BACK; i++) {
     const d = new Date();
     d.setDate(d.getDate() - i);
     const dateStr = pacificDateString(d);
@@ -122,30 +124,20 @@ async function build() {
     for (const country of countries) {
       const list = await fetchJSON(`https://api.tvmaze.com/schedule?country=${country}&date=${dateStr}`);
       if (Array.isArray(list)) list.forEach(ep => {
-        // FIXED: Explicitly traverse the direct show object or embedded schema fallbacks
         const show = ep.show || (ep._embedded && ep._embedded.show);
         if (show?.id) {
           const audit = evaluateExclusion(show);
-          if (!audit.exclude) {
-            activeShowIds.add(show.id);
-          } else {
-            auditLogs.push({ name: show.name, type: show.type, status: "DROPPED BY FILTER", detail: audit.reason });
-          }
+          if (!audit.exclude) activeShowIds.add(show.id);
         }
       });
     }
 
     const webList = await fetchJSON(`https://api.tvmaze.com/schedule/web?date=${dateStr}`);
     if (Array.isArray(webList)) webList.forEach(ep => {
-      // FIXED: Explicitly traverse the direct show object or embedded schema fallbacks
       const show = ep.show || (ep._embedded && ep._embedded.show);
       if (show?.id) {
         const audit = evaluateExclusion(show);
-        if (!audit.exclude) {
-          activeShowIds.add(show.id);
-        } else {
-          auditLogs.push({ name: show.name, type: show.type, status: "DROPPED BY FILTER", detail: audit.reason });
-        }
+        if (!audit.exclude) activeShowIds.add(show.id);
       }
     });
   }
@@ -187,7 +179,7 @@ async function build() {
 
   const todayStr = pacificDateString(new Date());
   const cutoffTarget = new Date();
-  cutoffTarget.setDate(cutoffTarget.getDate() - DAYS_BACK);
+  cutoffTarget.setDate(cutoffTarget.getDate() - RETENTION_DAYS_BACK);
   const cutoffStr = pacificDateString(cutoffTarget);
 
   const filteredMetas = metas.filter(show => {
@@ -197,7 +189,7 @@ async function build() {
     if (isKeep) {
       auditLogs.push({ name: show.name, type: "Series/Reality", status: "KEPT", detail: `Latest airdate: ${latest}` });
     } else {
-      auditLogs.push({ name: show.name, type: "Series/Reality", status: "DROPPED BY DATE", detail: `Airdate ${latest} is outside window` });
+      auditLogs.push({ name: show.name, type: "Series/Reality", status: "DROPPED BY DATE", detail: `Airdate ${latest} falls outside retention window` });
     }
     return isKeep;
   });
