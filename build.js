@@ -10,7 +10,6 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TMDB_API_KEY = "944017b839d3c040bdd2574083e4c1bc";
 
 const CATALOG_DIR = path.join(__dirname, "catalog", "series");
-// FIXED: Expanded search buffer to capture timezone boundary shifts across networks
 const DISCOVERY_DAYS_BACK = 12; 
 const RETENTION_DAYS_BACK = 9;
 
@@ -79,9 +78,9 @@ function evaluateExclusion(show) {
     return { exclude: true, reason: `Blocked Language (${lang})` };
   }
   
-  const allowedGenres = ["panel", "quiz", "game show", "game-show", "reality"];
-  if (genres.some(g => allowedGenres.includes(g)) || t === "reality") {
-    return { exclude: false, reason: "Allowed Reality/Variety" };
+  const allowedGenres = ["panel", "quiz", "game show", "game-show", "reality", "home improvement", "renovation"];
+  if (genres.some(g => allowedGenres.includes(g)) || t === "reality" || name.includes("zombie")) {
+    return { exclude: false, reason: "Allowed Reality/Renovation Content" };
   }
   
   if (t === "sports" || genres.includes("sports")) return { exclude: true, reason: "Excluded: Sports" };
@@ -113,9 +112,8 @@ async function build() {
   const activeShowIds = new Set();
   const countries = ["US", "GB", "CA", "AU", "NZ"];
   
-  console.log("Beginning automated schedule analysis with timezone correction...");
+  console.log("Beginning automated schedule analysis with API-Data Correction...");
 
-  // Broad scan to catch global timezone alignment errors
   for (let i = 0; i < DISCOVERY_DAYS_BACK; i++) {
     const d = new Date();
     d.setDate(d.getDate() - i);
@@ -123,23 +121,54 @@ async function build() {
     
     for (const country of countries) {
       const list = await fetchJSON(`https://api.tvmaze.com/schedule?country=${country}&date=${dateStr}`);
-      if (Array.isArray(list)) list.forEach(ep => {
-        const show = ep.show || (ep._embedded && ep._embedded.show);
-        if (show?.id) {
-          const audit = evaluateExclusion(show);
-          if (!audit.exclude) activeShowIds.add(show.id);
+      if (Array.isArray(list)) {
+        for (const ep of list) {
+          let showId = ep.show?.id || (ep._embedded && ep._embedded?.show?.id);
+          
+          // FIX: If it's a spin-off or reality block, bypass TVMaze's broken schedule mapping
+          // by pulling the absolute true parent ID directly from the standalone episode object reference
+          if (ep._links?.self?.href && ep.name) {
+            const epId = ep._links.self.href.split("/").pop();
+            const epData = await fetchJSON(`https://api.tvmaze.com/episodes/${epId}?embed=show`);
+            if (epData?._embedded?.show?.id) {
+              showId = epData._embedded.show.id;
+            }
+          }
+
+          if (showId) {
+            // Fetch basic metadata for the exclusion check
+            const miniShow = await fetchJSON(`https://api.tvmaze.com/shows/${showId}`);
+            if (miniShow) {
+              const audit = evaluateExclusion(miniShow);
+              if (!audit.exclude) activeShowIds.add(showId);
+            }
+          }
         }
-      });
+      }
     }
 
     const webList = await fetchJSON(`https://api.tvmaze.com/schedule/web?date=${dateStr}`);
-    if (Array.isArray(webList)) webList.forEach(ep => {
-      const show = ep.show || (ep._embedded && ep._embedded.show);
-      if (show?.id) {
-        const audit = evaluateExclusion(show);
-        if (!audit.exclude) activeShowIds.add(show.id);
+    if (Array.isArray(webList)) {
+      for (const ep of webList) {
+        let showId = ep.show?.id || (ep._embedded && ep._embedded?.show?.id);
+        
+        if (ep._links?.self?.href) {
+          const epId = ep._links.self.href.split("/").pop();
+          const epData = await fetchJSON(`https://api.tvmaze.com/episodes/${epId}?embed=show`);
+          if (epData?._embedded?.show?.id) {
+            showId = epData._embedded.show.id;
+          }
+        }
+
+        if (showId) {
+          const miniShow = await fetchJSON(`https://api.tvmaze.com/shows/${showId}`);
+          if (miniShow) {
+            const audit = evaluateExclusion(miniShow);
+            if (!audit.exclude) activeShowIds.add(showId);
+          }
+        }
       }
-    });
+    }
   }
 
   const metas = [];
