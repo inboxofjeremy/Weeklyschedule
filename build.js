@@ -9,7 +9,6 @@ import { fileURLToPath } from 'url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TMDB_API_KEY = "944017b839d3c040bdd2574083e4c1bc";
 
-// Ensure paths are absolute based on the script location
 const CATALOG_DIR = path.join(__dirname, "catalog", "series");
 const DAYS_BACK = 9;
 const TVMAZE_DELAY_MS = 150;
@@ -42,15 +41,15 @@ function pacificDateString(date = new Date()) {
   return `${map.year}-${map.month}-${map.day}`;
 }
 
-function getLatestDate(show) {
+// Fixed to only consider episodes up to TODAY (June 15th)
+function getLatestValidDate(show, todayStr) {
   const dates = (show.videos || [])
     .map(v => v.released)
-    .filter(d => d && typeof d === 'string' && d.includes('-'));
+    .filter(d => d && typeof d === 'string' && d.includes('-') && d <= todayStr);
   return dates.length > 0 ? dates.sort().reverse()[0] : "0000-00-00";
 }
 
 function isExcluded(show) {
-  // (Your existing isExcluded logic)
   const name = (show.name || "").toLowerCase();
   const t = (show.type || "").toLowerCase();
   const genres = (show.genres || []).map(g => g.toLowerCase());
@@ -92,10 +91,13 @@ async function build() {
   const activeShowIds = new Set();
   const countries = ["US", "GB", "CA", "AU", "NZ"];
   
+  console.log("=== BUILD START: Discovery Phase ===");
+
   for (let i = 0; i < DAYS_BACK; i++) {
     const d = new Date();
     d.setDate(d.getDate() - i);
     const dateStr = pacificDateString(d);
+    
     for (const country of countries) {
       const list = await fetchJSON(`https://api.tvmaze.com/schedule?country=${country}&date=${dateStr}`);
       if (Array.isArray(list)) list.forEach(ep => {
@@ -103,6 +105,12 @@ async function build() {
         if (show?.id && !isExcluded(show)) activeShowIds.add(show.id);
       });
     }
+
+    const webList = await fetchJSON(`https://api.tvmaze.com/schedule/web?date=${dateStr}`);
+    if (Array.isArray(webList)) webList.forEach(ep => {
+      const show = ep.show || ep._embedded?.show;
+      if (show?.id && !isExcluded(show)) activeShowIds.add(show.id);
+    });
   }
 
   const metas = [];
@@ -133,18 +141,24 @@ async function build() {
     });
   }
 
-  const cutoffDate = new Date();
-  cutoffDate.setDate(cutoffDate.getDate() - DAYS_BACK);
-  const cutoffStr = cutoffDate.toISOString().split('T')[0];
+  const todayStr = pacificDateString(new Date());
 
+  const cutoffTarget = new Date();
+  cutoffTarget.setDate(cutoffTarget.getDate() - DAYS_BACK);
+  const cutoffStr = pacificDateString(cutoffTarget);
+
+  // Filter and sort securely against the runtime's Pacific date parameters
   const filteredMetas = metas
-    .filter(show => getLatestDate(show) >= cutoffStr)
-    .sort((a, b) => getLatestDate(b).localeCompare(getLatestDate(a)));
+    .filter(show => {
+      const latest = getLatestValidDate(show, todayStr);
+      return latest >= cutoffStr && latest <= todayStr;
+    })
+    .sort((a, b) => {
+      return getLatestValidDate(b, todayStr).localeCompare(getLatestValidDate(a, todayStr));
+    });
 
-  // Ensure directory exists
   if (!fs.existsSync(CATALOG_DIR)) fs.mkdirSync(CATALOG_DIR, { recursive: true });
   
-  // Write file
   const filePath = path.join(CATALOG_DIR, "tvmaze_weekly_schedule.json");
   fs.writeFileSync(filePath, JSON.stringify({ metas: filteredMetas }, null, 2));
   console.log(`=== BUILD COMPLETE: Written to ${filePath} ===`);
