@@ -110,7 +110,7 @@ async function findTmdbId(show) {
 
 async function build() {
   const activeShowIds = new Set();
-  const countries = ["US", "GB", "CA", "AU", "NZ"];
+  const targetCountries = ["US", "GB", "CA", "AU", "NZ"];
   
   console.log("Beginning deep cross-feed schedule analysis...");
 
@@ -119,19 +119,26 @@ async function build() {
     d.setDate(d.getDate() - i);
     const dateStr = pacificDateString(d);
     
-    for (const country of countries) {
-      // Feed A: Traditional Broadcast TV Schedule
-      const list = await fetchJSON(`https://api.tvmaze.com/schedule?country=${country}&date=${dateStr}`);
-      if (Array.isArray(list)) list.forEach(ep => {
+    // 1. Fetch the full master schedule for the day (Includes broadcast and domestic web streaming)
+    const list = await fetchJSON(`https://api.tvmaze.com/schedule?date=${dateStr}`);
+    
+    if (Array.isArray(list)) {
+      list.forEach(ep => {
         const show = ep.show || (ep._embedded && ep._embedded.show);
-        if (show?.id) activeShowIds.add(show.id);
-      });
+        if (!show?.id) return;
 
-      // FIX: Feed B: Query country-specific web endpoints to capture regional digital/on-demand releases
-      const webList = await fetchJSON(`https://api.tvmaze.com/schedule/web?country=${country}&date=${dateStr}`);
-      if (Array.isArray(webList)) webList.forEach(ep => {
-        const show = ep.show || (ep._embedded && ep._embedded.show);
-        if (show?.id) activeShowIds.add(show.id);
+        // Extract regional identification strings safely
+        const networkCountry = show.network?.country?.code;
+        const webCountry = show.webChannel?.country?.code;
+
+        // Identify if it matches your target regions, or if it is a global streaming asset (null)
+        const isTargetNetwork = networkCountry && targetCountries.includes(networkCountry);
+        const isTargetWeb = webCountry && targetCountries.includes(webCountry);
+        const isGlobalWeb = !networkCountry && !webCountry; // Captures platforms with country: null
+
+        if (isTargetNetwork || isTargetWeb || isGlobalWeb) {
+          activeShowIds.add(show.id);
+        }
       });
     }
   }
