@@ -14,7 +14,6 @@ const DAYS_BACK = 9;
 const TVMAZE_DELAY_MS = 150;
 let lastTvmazeCall = 0;
 
-// Tracking arrays strictly for GitHub Actions console visibility
 const auditLogs = [];
 
 async function fetchJSON(url) {
@@ -65,11 +64,11 @@ function evaluateExclusion(show) {
   const webChannel = (show.webChannel?.name || "").toLowerCase();
   const network = (show.network?.name || "").toLowerCase();
 
-  if (name.includes("blankety blank")) return { exclude: false, reason: "Whitelisted Template" };
+  if (name.includes("blankety blank")) return { exclude: false, reason: "Whitelisted" };
 
   const blockedNetworks = ["iqiyi", "bilibili", "wavve", "youku", "tencent qq", "vivaone", "premier", "смотрим", "кион", "geo entertainment", "tokyo mx"];
   if (blockedNetworks.includes(webChannel) || blockedNetworks.includes(network)) {
-    return { exclude: true, reason: `Blocked Network/Channel (${webChannel || network})` };
+    return { exclude: true, reason: `Blocked Network (${webChannel || network})` };
   }
   
   const blockedLanguages = ["chinese", "japanese", "russian", "mandarin", "cantonese", "korean", "hindi", "thai", "spanish", "norwegian", "hungarian", "dutch", "swedish", "portuguese", "urdu", "turkish", "hebrew"];
@@ -79,14 +78,16 @@ function evaluateExclusion(show) {
   
   const allowedGenres = ["panel", "quiz", "game show", "game-show", "reality"];
   if (genres.some(g => allowedGenres.includes(g)) || t === "reality") {
-    return { exclude: false, reason: "Allowed Reality/Game Show Type" };
+    return { exclude: false, reason: "Allowed Variety/Reality" };
   }
   
   if (t === "sports" || genres.includes("sports")) return { exclude: true, reason: "Excluded: Sports" };
   if (t === "news" || t === "talk show" || genres.includes("news")) return { exclude: true, reason: "Excluded: News/Talk" };
   
-  // FIX: Explicit string check to prevent catching home-renovation "Docu-series" categories
-  if (t === "documentary" || genres.includes("documentary")) return { exclude: true, reason: "Excluded: Pure Documentary" };
+  // FIXED: Explicit structural matching prevents dropping "Docu-series" reality blocks
+  if (t === "documentary" || genres.includes("documentary")) {
+    return { exclude: true, reason: "Excluded: Pure Documentary" };
+  }
   
   return { exclude: false, reason: "Passed general rules" };
 }
@@ -104,15 +105,14 @@ async function findTmdbId(show) {
   const search = await fetchJSON(`https://api.themoviedb.org/3/search/tv?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(show.name)}`);
   if (!search?.results?.length) return null;
   const matches = search.results.filter(r => r.name.toLowerCase() === show.name.toLowerCase());
-  const best = matches.length > 0 ? matches[0] : search.results[0];
-  return best?.id || null;
+  return matches.length > 0 ? matches[0].id : search.results[0].id;
 }
 
 async function build() {
   const activeShowIds = new Set();
   const countries = ["US", "GB", "CA", "AU", "NZ"];
   
-  console.log("Starting script build execution analysis...");
+  console.log("Beginning automated schedule analysis...");
 
   for (let i = 0; i < DAYS_BACK; i++) {
     const d = new Date();
@@ -122,9 +122,9 @@ async function build() {
     for (const country of countries) {
       const list = await fetchJSON(`https://api.tvmaze.com/schedule?country=${country}&date=${dateStr}`);
       if (Array.isArray(list)) list.forEach(ep => {
-        // FIX: Check both core show and embedded fallback blocks
+        // FIXED: Explicitly traverse the direct show object or embedded schema fallbacks
         const show = ep.show || (ep._embedded && ep._embedded.show);
-        if (show && show.id) {
+        if (show?.id) {
           const audit = evaluateExclusion(show);
           if (!audit.exclude) {
             activeShowIds.add(show.id);
@@ -137,9 +137,9 @@ async function build() {
 
     const webList = await fetchJSON(`https://api.tvmaze.com/schedule/web?date=${dateStr}`);
     if (Array.isArray(webList)) webList.forEach(ep => {
-      // FIX: Check both core show and embedded fallback blocks
+      // FIXED: Explicitly traverse the direct show object or embedded schema fallbacks
       const show = ep.show || (ep._embedded && ep._embedded.show);
-      if (show && show.id) {
+      if (show?.id) {
         const audit = evaluateExclusion(show);
         if (!audit.exclude) {
           activeShowIds.add(show.id);
@@ -217,9 +217,6 @@ async function build() {
   const filePath = path.join(CATALOG_DIR, "tvmaze_weekly_schedule.json");
   fs.writeFileSync(filePath, JSON.stringify({ metas: finalMetas }, null, 2));
 
-  // ==========================================
-  // OMNISCIENT GITHUB ACTION REPORTING PRINT
-  // ==========================================
   console.log("\n=================================================================================");
   console.log("                    FINAL PIPELINE PROCESSING SUMMARY REPORT                      ");
   console.log("=================================================================================");
