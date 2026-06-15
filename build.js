@@ -133,7 +133,6 @@ async function build() {
       description: cleanHTML(showData.summary),
       poster: showData.image?.original || showData.image?.medium || null,
       background: showData.image?.original || null,
-      // Sort episodes chronologically
       videos: (showData._embedded?.episodes || [])
         .sort((a, b) => (a.season - b.season) || (a.number - b.number))
         .map(ep => ({
@@ -147,11 +146,16 @@ async function build() {
     });
   }
 
-  // Sort the final catalog list safely by the date of the most recent episode
+  // Sort the final catalog list by the most recent episode release date
   metas.sort((a, b) => {
-    const lastA = (a.videos && a.videos.length > 0) ? a.videos[a.videos.length - 1].released : "";
-    const lastB = (b.videos && b.videos.length > 0) ? b.videos[b.videos.length - 1].released : "";
-    return (lastB || "").localeCompare(lastA || "");
+    const getLatestDate = (show) => {
+      const dates = (show.videos || [])
+        .map(v => v.released)
+        .filter(d => d && d !== "");
+      return dates.length > 0 ? dates.sort().reverse()[0] : "0000-00-00";
+    };
+
+    return getLatestDate(b).localeCompare(getLatestDate(a));
   });
 
   fs.mkdirSync(CATALOG_DIR, { recursive: true });
