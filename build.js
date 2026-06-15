@@ -13,7 +13,8 @@ const CATALOG_DIR = path.join(__dirname, "catalog", "series");
 const DISCOVERY_DAYS_BACK = 12; 
 const RETENTION_DAYS_BACK = 9;
 
-const TVMAZE_DELAY_MS = 150;
+// Increased safety delay slightly to accommodate multi-country sweeps safely
+const TVMAZE_DELAY_MS = 200;
 let lastTvmazeCall = 0;
 
 const auditLogs = [];
@@ -112,36 +113,46 @@ async function build() {
   const activeShowIds = new Set();
   const targetCountries = ["US", "GB", "CA", "AU", "NZ"];
   
-  console.log("Beginning deep cross-feed schedule analysis...");
+  console.log(`Starting multi-region schedule sync across ${DISCOVERY_DAYS_BACK} days...`);
 
   for (let i = 0; i < DISCOVERY_DAYS_BACK; i++) {
     const d = new Date();
     d.setDate(d.getDate() - i);
     const dateStr = pacificDateString(d);
     
-    // 1. Fetch the full master schedule for the day (Includes broadcast and domestic web streaming)
-    const list = await fetchJSON(`https://api.tvmaze.com/schedule?date=${dateStr}`);
-    
-    if (Array.isArray(list)) {
-      list.forEach(ep => {
+    // 1. Fetch standard regional broadcast guides explicitly
+    for (const country of targetCountries) {
+      const broadcastList = await fetchJSON(`https://api.tvmaze.com/schedule?country=${country}&date=${dateStr}`);
+      if (Array.isArray(broadcastList)) {
+        broadcastList.forEach(ep => {
+          const show = ep.show || (ep._embedded && ep._embedded.show);
+          if (show?.id) activeShowIds.add(show.id);
+        });
+      }
+    }
+
+    // 2. Fetch the flat web/streaming master list for the day
+    // (We look for target country filters or global streaming origins locally)
+    const webList = await fetchJSON(`https://api.tvmaze.com/schedule/web?date=${dateStr}`);
+    if (Array.isArray(webList)) {
+      webList.forEach(ep => {
         const show = ep.show || (ep._embedded && ep._embedded.show);
         if (!show?.id) return;
 
-        // Extract regional identification strings safely
-        const networkCountry = show.network?.country?.code;
         const webCountry = show.webChannel?.country?.code;
+        const networkCountry = show.network?.country?.code;
 
-        // Identify if it matches your target regions, or if it is a global streaming asset (null)
-        const isTargetNetwork = networkCountry && targetCountries.includes(networkCountry);
         const isTargetWeb = webCountry && targetCountries.includes(webCountry);
-        const isGlobalWeb = !networkCountry && !webCountry; // Captures platforms with country: null
+        const isGlobalWeb = !networkCountry && !webCountry; // Covers platforms with no explicit country origin
 
-        if (isTargetNetwork || isTargetWeb || isGlobalWeb) {
+        if (isTargetWeb || isGlobalWeb) {
           activeShowIds.add(show.id);
         }
       });
     }
   }
+
+  console.log(`Collected ${activeShowIds.size} unique candidate shows. Processing metadata mappings...`);
 
   const metas = [];
   for (const showId of activeShowIds) {
