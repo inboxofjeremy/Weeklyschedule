@@ -112,7 +112,7 @@ async function build() {
   const activeShowIds = new Set();
   const countries = ["US", "GB", "CA", "AU", "NZ"];
   
-  console.log("Beginning automated schedule analysis with API-Data Correction...");
+  console.log("Beginning deep cross-feed schedule analysis...");
 
   for (let i = 0; i < DISCOVERY_DAYS_BACK; i++) {
     const d = new Date();
@@ -120,54 +120,19 @@ async function build() {
     const dateStr = pacificDateString(d);
     
     for (const country of countries) {
+      // Feed A: Traditional Broadcast TV Schedule
       const list = await fetchJSON(`https://api.tvmaze.com/schedule?country=${country}&date=${dateStr}`);
-      if (Array.isArray(list)) {
-        for (const ep of list) {
-          let showId = ep.show?.id || (ep._embedded && ep._embedded?.show?.id);
-          
-          // FIX: If it's a spin-off or reality block, bypass TVMaze's broken schedule mapping
-          // by pulling the absolute true parent ID directly from the standalone episode object reference
-          if (ep._links?.self?.href && ep.name) {
-            const epId = ep._links.self.href.split("/").pop();
-            const epData = await fetchJSON(`https://api.tvmaze.com/episodes/${epId}?embed=show`);
-            if (epData?._embedded?.show?.id) {
-              showId = epData._embedded.show.id;
-            }
-          }
+      if (Array.isArray(list)) list.forEach(ep => {
+        const show = ep.show || (ep._embedded && ep._embedded.show);
+        if (show?.id) activeShowIds.add(show.id);
+      });
 
-          if (showId) {
-            // Fetch basic metadata for the exclusion check
-            const miniShow = await fetchJSON(`https://api.tvmaze.com/shows/${showId}`);
-            if (miniShow) {
-              const audit = evaluateExclusion(miniShow);
-              if (!audit.exclude) activeShowIds.add(showId);
-            }
-          }
-        }
-      }
-    }
-
-    const webList = await fetchJSON(`https://api.tvmaze.com/schedule/web?date=${dateStr}`);
-    if (Array.isArray(webList)) {
-      for (const ep of webList) {
-        let showId = ep.show?.id || (ep._embedded && ep._embedded?.show?.id);
-        
-        if (ep._links?.self?.href) {
-          const epId = ep._links.self.href.split("/").pop();
-          const epData = await fetchJSON(`https://api.tvmaze.com/episodes/${epId}?embed=show`);
-          if (epData?._embedded?.show?.id) {
-            showId = epData._embedded.show.id;
-          }
-        }
-
-        if (showId) {
-          const miniShow = await fetchJSON(`https://api.tvmaze.com/shows/${showId}`);
-          if (miniShow) {
-            const audit = evaluateExclusion(miniShow);
-            if (!audit.exclude) activeShowIds.add(showId);
-          }
-        }
-      }
+      // FIX: Feed B: Query country-specific web endpoints to capture regional digital/on-demand releases
+      const webList = await fetchJSON(`https://api.tvmaze.com/schedule/web?country=${country}&date=${dateStr}`);
+      if (Array.isArray(webList)) webList.forEach(ep => {
+        const show = ep.show || (ep._embedded && ep._embedded.show);
+        if (show?.id) activeShowIds.add(show.id);
+      });
     }
   }
 
