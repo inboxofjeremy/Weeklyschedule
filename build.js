@@ -1,5 +1,5 @@
 /**
- * build.js — Stremio static catalog
+ * build.js — Stremio static catalog with Template Scraper Fallback
  */
 
 import fs from "fs";
@@ -12,6 +12,14 @@ const TMDB_API_KEY = "944017b839d3c040bdd2574083e4c1bc";
 const CATALOG_DIR = path.join(__dirname, "catalog", "series");
 const DISCOVERY_DAYS_BACK = 12; 
 const RETENTION_DAYS_BACK = 9;
+
+// =================================================================================
+// STATIC OVERRIDES: Force-map TVMaze IDs to TMDB IDs when metadata mismatch happens
+// =================================================================================
+const TMDB_ID_OVERRIDES = {
+  55238: 136009, // Force TVMaze Blankety Blank (2021) directly to TMDB 136009
+  92222: 242091  // Force TVMaze Shark! (2026) directly to its true 2026 TMDB match
+};
 
 const TVMAZE_DELAY_MS = 200;
 let lastTvmazeCall = 0;
@@ -92,11 +100,12 @@ function evaluateExclusion(show) {
   return { exclude: false, reason: "Passed general rules" };
 }
 
-/**
- * Deep Array Inspection Engine with a Year-Variance Window.
- * Resolves calendar misalignments like Christmas specials vs New Year series premiers.
- */
 async function findTmdbId(show) {
+  if (TMDB_ID_OVERRIDES[show.id]) {
+    console.log(`[Override Triggered] Explicitly mapping TVMaze ${show.id} to TMDB ${TMDB_ID_OVERRIDES[show.id]}`);
+    return TMDB_ID_OVERRIDES[show.id];
+  }
+
   let imdb = show?.externals?.imdb;
   if (!imdb) {
     const full = await fetchJSON(`https://api.tvmaze.com/shows/${show.id}`);
@@ -109,7 +118,6 @@ async function findTmdbId(show) {
   const normalizeTitle = str => (str || "").toLowerCase().replace(/[^a-z0-9]/g, "").trim();
   const targetNormalized = normalizeTitle(show.name);
 
-  // 1. Structural Match via direct IMDB lookup
   if (imdb) {
     const data = await fetchJSON(`https://api.themoviedb.org/3/find/${imdb}?api_key=${TMDB_API_KEY}&external_source=imdb_id`);
     if (data?.tv_results?.length) {
@@ -117,7 +125,6 @@ async function findTmdbId(show) {
       const tmdbYearStr = match.first_air_date ? match.first_air_date.split("-")[0] : null;
       const tmdbYear = tmdbYearStr ? parseInt(tmdbYearStr, 10) : null;
       
-      // Allow a 1-year variance window even on structural links
       if (!tvmazeYear || !tmdbYear || Math.abs(tmdbYear - tvmazeYear) <= 1) {
         return match.id;
       }
@@ -125,7 +132,6 @@ async function findTmdbId(show) {
     }
   }
   
-  // 2. Deep Search: Scan the full search array checking for +/- 1 year of variance
   const search = await fetchJSON(`https://api.themoviedb.org/3/search/tv?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(show.name)}`);
   if (!search?.results?.length) return null;
   
@@ -142,11 +148,9 @@ async function findTmdbId(show) {
     if (strictYearMatch) return strictYearMatch.id;
   }
 
-  // 3. Normalized Title Fallback: Fallback to name alone if calendar data is empty
   const stringMatch = search.results.find(r => normalizeTitle(r.name) === targetNormalized);
   if (stringMatch) return stringMatch.id;
 
-  // Ultimate fallback
   return search.results[0].id;
 }
 
@@ -154,14 +158,13 @@ async function build() {
   const activeShowIds = new Set();
   const targetCountries = ["US", "GB", "CA", "AU", "NZ"];
   
-  console.log(`Starting structural cross-feed schedule analysis across ${DISCOVERY_DAYS_BACK} days...`);
+  console.log(`Starting structural cross-feed schedule analysis...`);
 
   for (let i = 0; i < DISCOVERY_DAYS_BACK; i++) {
     const d = new Date();
     d.setDate(d.getDate() - i);
     const dateStr = pacificDateString(d);
     
-    // Fetch standard regional broadcast guides explicitly
     for (const country of targetCountries) {
       const broadcastList = await fetchJSON(`https://api.tvmaze.com/schedule?country=${country}&date=${dateStr}`);
       if (Array.isArray(broadcastList)) {
@@ -172,7 +175,6 @@ async function build() {
       }
     }
 
-    // Fetch the web/streaming guide
     const webList = await fetchJSON(`https://api.tvmaze.com/schedule/web?date=${dateStr}`);
     if (Array.isArray(webList)) {
       webList.forEach(ep => {
@@ -182,17 +184,14 @@ async function build() {
         const webCountry = show.webChannel?.country?.code;
         const networkCountry = show.network?.country?.code;
 
-        const isTargetWeb = webCountry && targetCountries.includes(webCountry);
-        const isGlobalWeb = !networkCountry && !webCountry; 
-
-        if (isTargetWeb || isGlobalWeb) {
+        if ((webCountry && targetCountries.includes(webCountry)) || (!networkCountry && !webCountry)) {
           activeShowIds.add(show.id);
         }
       });
     }
   }
 
-  console.log(`Collected ${activeShowIds.size} unique candidate shows. Processing metadata mappings...`);
+  console.log(`Processing metadata mappings for ${activeShowIds.size} shows...`);
 
   const metas = [];
   for (const showId of activeShowIds) {
@@ -218,14 +217,38 @@ async function build() {
       background: showData.image?.original || null,
       videos: (showData._embedded?.episodes || [])
         .sort((a, b) => (a.season - b.season) || (a.number - b.number))
-        .map(ep => ({
-          id: `${stremioId}:${ep.season || 0}:${ep.number || 0}`,
-          title: ep.name || `Episode ${ep.number || 0}`,
-          season: ep.season || 0,
-          episode: ep.number || 0,
-          released: ep.airdate || (ep.airstamp ? ep.airstamp.split('T')[0] : null),
-          overview: cleanHTML(ep.summary || "")
-        }))
+        .map(ep => {
+          const sNum = ep.season || 1;
+          const eNum = ep.number || 0;
+          const epAirDate = ep.airdate || (ep.airstamp ? ep.airstamp.split('T')[0] : null);
+          const launchYear = showData.premiered ? showData.premiered.split("-")[0] : "2026";
+          
+          // Construct an explicit fallback string that mimics a perfect text layout match
+          const fallbackString = `${showData.name} S${String(sNum).padStart(2, '0')}E${String(eNum).padStart(2, '0')}`;
+
+          return {
+            id: `${stremioId}:${sNum}:${eNum}`,
+            title: ep.name || `Episode ${eNum}`,
+            season: sNum,
+            episode: eNum,
+            released: epAirDate,
+            overview: cleanHTML(ep.summary || ""),
+            
+            // EMERGENCY INJECTION PROPERTIES:
+            // Forces scraping addons to accept these parameters when TMDB variables return empty
+            name: fallbackString,
+            series: showData.name,
+            fallback_title: fallbackString,
+            fallback_name: fallbackString,
+            episode_name: ep.name || `Episode ${eNum}`,
+            
+            // Meta configurations to satisfy parser template checks
+            g_title: showData.name,
+            g_year: launchYear,
+            g_season: sNum,
+            g_episode: eNum
+          };
+        })
     });
   }
 
