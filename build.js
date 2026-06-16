@@ -93,8 +93,8 @@ function evaluateExclusion(show) {
 }
 
 /**
- * Enhanced matching logic: resolves title text collisions and bad IMDb cross-links
- * by cleaning punctuation strings and verifying premier years.
+ * Deep Array Inspection Engine: Scans the complete search array to locate
+ * the precise match where cleaned titles and creation years match.
  */
 async function findTmdbId(show) {
   let imdb = show?.externals?.imdb;
@@ -105,7 +105,7 @@ async function findTmdbId(show) {
   
   const tvmazeYear = show.premiered ? show.premiered.split("-")[0] : null;
   
-  // Helper to remove punctuation and symbols for resilient string matching
+  // Strip punctuation and symbols for resilient string comparisons
   const normalizeTitle = str => (str || "").toLowerCase().replace(/[^a-z0-9]/g, "").trim();
   const targetNormalized = normalizeTitle(show.name);
 
@@ -119,11 +119,11 @@ async function findTmdbId(show) {
       if (!tvmazeYear || tmdbYear === tvmazeYear) {
         return match.id;
       }
-      console.log(`[Mismatch Warning] IMDb ID ${imdb} linked to wrong year. Falling back to robust text search.`);
+      console.log(`[Mismatch Warning] IMDb ID ${imdb} linked to wrong year. Falling back to deep array search.`);
     }
   }
   
-  // 2. Robust Text Match (Compares Normalized Titles AND Production Years)
+  // 2. Deep Search: Scan the full array returned by TMDB for a strict title + year combo
   const search = await fetchJSON(`https://api.themoviedb.org/3/search/tv?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(show.name)}`);
   if (!search?.results?.length) return null;
   
@@ -135,11 +135,11 @@ async function findTmdbId(show) {
     if (strictYearMatch) return strictYearMatch.id;
   }
 
-  // 3. Normalized Fallback Match (Matches title string ignoring typos/punctuation)
+  // 3. Normalized Title Fallback: Scan the full array for a title match regardless of launch year
   const stringMatch = search.results.find(r => normalizeTitle(r.name) === targetNormalized);
   if (stringMatch) return stringMatch.id;
 
-  // Ultimate Fallback
+  // Ultimate fallback to index 0 if deep filters fail
   return search.results[0].id;
 }
 
