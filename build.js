@@ -13,7 +13,6 @@ const CATALOG_DIR = path.join(__dirname, "catalog", "series");
 const DISCOVERY_DAYS_BACK = 12; 
 const RETENTION_DAYS_BACK = 9;
 
-// Increased safety delay slightly to accommodate multi-country sweeps safely
 const TVMAZE_DELAY_MS = 200;
 let lastTvmazeCall = 0;
 
@@ -93,34 +92,57 @@ function evaluateExclusion(show) {
   return { exclude: false, reason: "Passed general rules" };
 }
 
+/**
+ * Enhanced matching logic: resolves title collisions by explicitly comparing production years.
+ */
 async function findTmdbId(show) {
   let imdb = show?.externals?.imdb;
   if (!imdb) {
     const full = await fetchJSON(`https://api.tvmaze.com/shows/${show.id}`);
     imdb = full?.externals?.imdb;
   }
+  
+  // 1. Structural Match: If IMDB identification exists, verify directly via TMDB Find endpoint
   if (imdb) {
     const data = await fetchJSON(`https://api.themoviedb.org/3/find/${imdb}?api_key=${TMDB_API_KEY}&external_source=imdb_id`);
     if (data?.tv_results?.length) return data.tv_results[0].id;
   }
+  
+  // Extract premiere launch year from source
+  const tvmazeYear = show.premiered ? show.premiered.split("-")[0] : null;
+  
+  // 2. Strict Fallback Match: Filter search results checking both text identity and production year
   const search = await fetchJSON(`https://api.themoviedb.org/3/search/tv?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(show.name)}`);
   if (!search?.results?.length) return null;
-  const matches = search.results.filter(r => r.name.toLowerCase() === show.name.toLowerCase());
-  return matches.length > 0 ? matches[0].id : search.results[0].id;
+  
+  if (tvmazeYear) {
+    const strictYearMatch = search.results.find(r => {
+      const tmdbYear = r.first_air_date ? r.first_air_date.split("-")[0] : null;
+      return r.name.toLowerCase() === show.name.toLowerCase() && tmdbYear === tvmazeYear;
+    });
+    if (strictYearMatch) return strictYearMatch.id;
+  }
+
+  // 3. Normalized Fallback Match: Find matching text identity if production year formats differ
+  const stringMatch = search.results.find(r => r.name.toLowerCase() === show.name.toLowerCase());
+  if (stringMatch) return stringMatch.id;
+
+  // Default to top relevant popularity index
+  return search.results[0].id;
 }
 
 async function build() {
   const activeShowIds = new Set();
   const targetCountries = ["US", "GB", "CA", "AU", "NZ"];
   
-  console.log(`Starting multi-region schedule sync across ${DISCOVERY_DAYS_BACK} days...`);
+  console.log(`Starting structural cross-feed schedule analysis across ${DISCOVERY_DAYS_BACK} days...`);
 
   for (let i = 0; i < DISCOVERY_DAYS_BACK; i++) {
     const d = new Date();
     d.setDate(d.getDate() - i);
     const dateStr = pacificDateString(d);
     
-    // 1. Fetch standard regional broadcast guides explicitly
+    // Fetch standard regional broadcast guides explicitly
     for (const country of targetCountries) {
       const broadcastList = await fetchJSON(`https://api.tvmaze.com/schedule?country=${country}&date=${dateStr}`);
       if (Array.isArray(broadcastList)) {
@@ -131,8 +153,7 @@ async function build() {
       }
     }
 
-    // 2. Fetch the flat web/streaming master list for the day
-    // (We look for target country filters or global streaming origins locally)
+    // Fetch the web/streaming guide
     const webList = await fetchJSON(`https://api.tvmaze.com/schedule/web?date=${dateStr}`);
     if (Array.isArray(webList)) {
       webList.forEach(ep => {
@@ -143,7 +164,7 @@ async function build() {
         const networkCountry = show.network?.country?.code;
 
         const isTargetWeb = webCountry && targetCountries.includes(webCountry);
-        const isGlobalWeb = !networkCountry && !webCountry; // Covers platforms with no explicit country origin
+        const isGlobalWeb = !networkCountry && !webCountry; 
 
         if (isTargetWeb || isGlobalWeb) {
           activeShowIds.add(show.id);
