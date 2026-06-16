@@ -93,7 +93,8 @@ function evaluateExclusion(show) {
 }
 
 /**
- * Enhanced matching logic: resolves title collisions by explicitly comparing production years.
+ * Enhanced matching logic: resolves title text collisions and bad IMDb cross-links
+ * by cleaning punctuation strings and verifying premier years.
  */
 async function findTmdbId(show) {
   let imdb = show?.externals?.imdb;
@@ -102,32 +103,43 @@ async function findTmdbId(show) {
     imdb = full?.externals?.imdb;
   }
   
-  // 1. Structural Match: If IMDB identification exists, verify directly via TMDB Find endpoint
-  if (imdb) {
-    const data = await fetchJSON(`https://api.themoviedb.org/3/find/${imdb}?api_key=${TMDB_API_KEY}&external_source=imdb_id`);
-    if (data?.tv_results?.length) return data.tv_results[0].id;
-  }
-  
-  // Extract premiere launch year from source
   const tvmazeYear = show.premiered ? show.premiered.split("-")[0] : null;
   
-  // 2. Strict Fallback Match: Filter search results checking both text identity and production year
+  // Helper to remove punctuation and symbols for resilient string matching
+  const normalizeTitle = str => (str || "").toLowerCase().replace(/[^a-z0-9]/g, "").trim();
+  const targetNormalized = normalizeTitle(show.name);
+
+  // 1. Structural Match with Year-Verification Safety Guard
+  if (imdb) {
+    const data = await fetchJSON(`https://api.themoviedb.org/3/find/${imdb}?api_key=${TMDB_API_KEY}&external_source=imdb_id`);
+    if (data?.tv_results?.length) {
+      const match = data.tv_results[0];
+      const tmdbYear = match.first_air_date ? match.first_air_date.split("-")[0] : null;
+      
+      if (!tvmazeYear || tmdbYear === tvmazeYear) {
+        return match.id;
+      }
+      console.log(`[Mismatch Warning] IMDb ID ${imdb} linked to wrong year. Falling back to robust text search.`);
+    }
+  }
+  
+  // 2. Robust Text Match (Compares Normalized Titles AND Production Years)
   const search = await fetchJSON(`https://api.themoviedb.org/3/search/tv?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(show.name)}`);
   if (!search?.results?.length) return null;
   
   if (tvmazeYear) {
     const strictYearMatch = search.results.find(r => {
       const tmdbYear = r.first_air_date ? r.first_air_date.split("-")[0] : null;
-      return r.name.toLowerCase() === show.name.toLowerCase() && tmdbYear === tvmazeYear;
+      return normalizeTitle(r.name) === targetNormalized && tmdbYear === tvmazeYear;
     });
     if (strictYearMatch) return strictYearMatch.id;
   }
 
-  // 3. Normalized Fallback Match: Find matching text identity if production year formats differ
-  const stringMatch = search.results.find(r => r.name.toLowerCase() === show.name.toLowerCase());
+  // 3. Normalized Fallback Match (Matches title string ignoring typos/punctuation)
+  const stringMatch = search.results.find(r => normalizeTitle(r.name) === targetNormalized);
   if (stringMatch) return stringMatch.id;
 
-  // Default to top relevant popularity index
+  // Ultimate Fallback
   return search.results[0].id;
 }
 
