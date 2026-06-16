@@ -93,8 +93,8 @@ function evaluateExclusion(show) {
 }
 
 /**
- * Deep Array Inspection Engine: Scans the complete search array to locate
- * the precise match where cleaned titles and creation years match.
+ * Deep Array Inspection Engine with a Year-Variance Window.
+ * Resolves calendar misalignments like Christmas specials vs New Year series premiers.
  */
 async function findTmdbId(show) {
   let imdb = show?.externals?.imdb;
@@ -103,43 +103,50 @@ async function findTmdbId(show) {
     imdb = full?.externals?.imdb;
   }
   
-  const tvmazeYear = show.premiered ? show.premiered.split("-")[0] : null;
+  const tvmazeYearStr = show.premiered ? show.premiered.split("-")[0] : null;
+  const tvmazeYear = tvmazeYearStr ? parseInt(tvmazeYearStr, 10) : null;
   
-  // Strip punctuation and symbols for resilient string comparisons
   const normalizeTitle = str => (str || "").toLowerCase().replace(/[^a-z0-9]/g, "").trim();
   const targetNormalized = normalizeTitle(show.name);
 
-  // 1. Structural Match with Year-Verification Safety Guard
+  // 1. Structural Match via direct IMDB lookup
   if (imdb) {
     const data = await fetchJSON(`https://api.themoviedb.org/3/find/${imdb}?api_key=${TMDB_API_KEY}&external_source=imdb_id`);
     if (data?.tv_results?.length) {
       const match = data.tv_results[0];
-      const tmdbYear = match.first_air_date ? match.first_air_date.split("-")[0] : null;
+      const tmdbYearStr = match.first_air_date ? match.first_air_date.split("-")[0] : null;
+      const tmdbYear = tmdbYearStr ? parseInt(tmdbYearStr, 10) : null;
       
-      if (!tvmazeYear || tmdbYear === tvmazeYear) {
+      // Allow a 1-year variance window even on structural links
+      if (!tvmazeYear || !tmdbYear || Math.abs(tmdbYear - tvmazeYear) <= 1) {
         return match.id;
       }
-      console.log(`[Mismatch Warning] IMDb ID ${imdb} linked to wrong year. Falling back to deep array search.`);
+      console.log(`[Mismatch Warning] IMDb ID ${imdb} linked to wrong era. Falling back to search window.`);
     }
   }
   
-  // 2. Deep Search: Scan the full array returned by TMDB for a strict title + year combo
+  // 2. Deep Search: Scan the full search array checking for +/- 1 year of variance
   const search = await fetchJSON(`https://api.themoviedb.org/3/search/tv?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(show.name)}`);
   if (!search?.results?.length) return null;
   
   if (tvmazeYear) {
     const strictYearMatch = search.results.find(r => {
-      const tmdbYear = r.first_air_date ? r.first_air_date.split("-")[0] : null;
-      return normalizeTitle(r.name) === targetNormalized && tmdbYear === tvmazeYear;
+      const tmdbYearStr = r.first_air_date ? r.first_air_date.split("-")[0] : null;
+      const tmdbYear = tmdbYearStr ? parseInt(tmdbYearStr, 10) : null;
+      
+      const isTitleMatch = normalizeTitle(r.name) === targetNormalized;
+      const isWithinYearWindow = tmdbYear && Math.abs(tmdbYear - tvmazeYear) <= 1;
+      
+      return isTitleMatch && isWithinYearWindow;
     });
     if (strictYearMatch) return strictYearMatch.id;
   }
 
-  // 3. Normalized Title Fallback: Scan the full array for a title match regardless of launch year
+  // 3. Normalized Title Fallback: Fallback to name alone if calendar data is empty
   const stringMatch = search.results.find(r => normalizeTitle(r.name) === targetNormalized);
   if (stringMatch) return stringMatch.id;
 
-  // Ultimate fallback to index 0 if deep filters fail
+  // Ultimate fallback
   return search.results[0].id;
 }
 
