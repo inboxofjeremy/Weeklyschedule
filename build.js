@@ -1,5 +1,5 @@
 /**
- * build.js — Stremio static catalog with Template Scraper Fallback
+ * build.js — Stremio static catalog
  */
 
 import fs from "fs";
@@ -11,17 +11,17 @@ const TMDB_API_KEY = "944017b839d3c040bdd2574083e4c1bc";
 
 const CATALOG_DIR = path.join(__dirname, "catalog", "series");
 const DISCOVERY_DAYS_BACK = 12; 
-const RETENTION_DAYS_BACK = 9;
+const RETENTION_DAYS_BACK = 9; // Only include shows with episodes aired within this window
 
 // =================================================================================
-// STATIC OVERRIDES: Force-map TVMaze IDs to TMDB IDs when metadata mismatch happens
+// STATIC OVERRIDES: Explicitly force correct ID configurations
 // =================================================================================
 const TMDB_ID_OVERRIDES = {
   55238: 136009, // Force TVMaze Blankety Blank (2021) directly to TMDB 136009
-  92222: 242091  // Force TVMaze Shark! (2026) directly to its true 2026 TMDB match
+  92222: 324650  // Explicitly map Zombie House Flipping: Family Business to your verified TMDB ID
 };
 
-const TVMAZE_DELAY_MS = 200;
+const TVMAZE_DELAY_MS = 250; // Increased spacing to proactively guard against 429 rate limiting
 let lastTvmazeCall = 0;
 
 const auditLogs = [];
@@ -86,11 +86,18 @@ function evaluateExclusion(show) {
     return { exclude: true, reason: `Blocked Language (${lang})` };
   }
   
+  // PRIORITY PROTECTION: Whitelist home, renovation, and reality series before broad genre blocks strip them out
   const allowedGenres = ["panel", "quiz", "game show", "game-show", "reality", "home improvement", "renovation"];
-  if (genres.some(g => allowedGenres.includes(g)) || t === "reality" || name.includes("zombie")) {
+  if (
+    genres.some(g => allowedGenres.includes(g)) || 
+    t === "reality" || 
+    name.includes("zombie") || 
+    name.includes("beach")
+  ) {
     return { exclude: false, reason: "Allowed Reality/Renovation Content" };
   }
   
+  // Standard structural exclusions
   if (t === "sports" || genres.includes("sports")) return { exclude: true, reason: "Excluded: Sports" };
   if (t === "news" || t === "talk show" || genres.includes("news")) return { exclude: true, reason: "Excluded: News/Talk" };
   if (t === "documentary" || genres.includes("documentary")) {
@@ -184,7 +191,11 @@ async function build() {
         const webCountry = show.webChannel?.country?.code;
         const networkCountry = show.network?.country?.code;
 
-        if ((webCountry && targetCountries.includes(webCountry)) || (!networkCountry && !webCountry)) {
+        if (
+          (webCountry && targetCountries.includes(webCountry)) || 
+          (show.webChannel && !webCountry) || 
+          (!networkCountry && !show.webChannel)
+        ) {
           activeShowIds.add(show.id);
         }
       });
@@ -196,7 +207,18 @@ async function build() {
   const metas = [];
   for (const showId of activeShowIds) {
     const showData = await fetchJSON(`https://api.tvmaze.com/shows/${showId}?embed=episodes`);
-    if (!showData) continue;
+    
+    // CATCH RATE LIMITING: Prevent shows from vanishing cleanly without generating an audit log trace
+    if (!showData) {
+      console.warn(`[API ERROR] Empty response for TVMaze ID ${showId}. Likely hit a 429 rate limit or network drop.`);
+      auditLogs.push({ 
+        name: `ID: ${showId}`, 
+        type: "UNKNOWN", 
+        status: "API FETCH FAILED", 
+        detail: "TVMaze request returned null. Check network or connection throttles." 
+      });
+      continue;
+    }
 
     const audit = evaluateExclusion(showData);
     if (audit.exclude) {
@@ -205,7 +227,13 @@ async function build() {
     }
 
     const tmdbId = await findTmdbId(showData);
-    const stremioId = tmdbId ? `tmdb:${tmdbId}` : `tvmaze:${showData.id}`;
+    
+    // TEMPORARY WORKAROUND FOR STREMIO CORE INTERNAL BUG: 
+    // If the show matches our broken tracking page, bypass Stremio's faulty lookup server by falling back to tvmaze layout protocols
+    let stremioId = tmdbId ? `tmdb:${tmdbId}` : `tvmaze:${showData.id}`;
+    if (tmdbId === 324650) {
+      stremioId = `tvmaze:${showData.id}`;
+    }
 
     metas.push({
       id: stremioId,
@@ -223,26 +251,27 @@ async function build() {
           const epAirDate = ep.airdate || (ep.airstamp ? ep.airstamp.split('T')[0] : null);
           const launchYear = showData.premiered ? showData.premiered.split("-")[0] : "2026";
           
-          // Construct an explicit fallback string that mimics a perfect text layout match
+          // STRICT RESOLUTION FIX: Guard against null structural replacements. Always mirror current safe meta root
+          const structuralNamespace = stremioId && !stremioId.includes('null') ? stremioId : `tvmaze:${showData.id}`;
+          const videoId = `${structuralNamespace}:${sNum}:${eNum}`;
+
           const fallbackString = `${showData.name} S${String(sNum).padStart(2, '0')}E${String(eNum).padStart(2, '0')}`;
 
           return {
-            id: `${stremioId}:${sNum}:${eNum}`,
+            id: videoId,
             title: ep.name || `Episode ${eNum}`,
             season: sNum,
             episode: eNum,
             released: epAirDate,
             overview: cleanHTML(ep.summary || ""),
             
-            // EMERGENCY INJECTION PROPERTIES:
-            // Forces scraping addons to accept these parameters when TMDB variables return empty
+            // EMERGENCY FALLBACK SCRAPER INJECTIONS: Forces raw queries when TMDB templates resolve empty
             name: fallbackString,
             series: showData.name,
             fallback_title: fallbackString,
             fallback_name: fallbackString,
             episode_name: ep.name || `Episode ${eNum}`,
             
-            // Meta configurations to satisfy parser template checks
             g_title: showData.name,
             g_year: launchYear,
             g_season: sNum,
@@ -257,9 +286,10 @@ async function build() {
   cutoffTarget.setDate(cutoffTarget.getDate() - RETENTION_DAYS_BACK);
   const cutoffStr = pacificDateString(cutoffTarget);
 
+  // AUTOMATED RETENTION WINDOW EVALUATION
   const filteredMetas = metas.filter(show => {
     const latest = getLatestValidDate(show, todayStr);
-    const isKeep = latest >= cutoffStr && latest <= todayStr;
+    const isKeep = latest >= cutoffStr && latest <= todayStr; // Must have an episode in the 9-day window
     
     if (isKeep) {
       auditLogs.push({ name: show.name, type: "Series/Reality", status: "KEPT", detail: `Latest airdate: ${latest}` });
