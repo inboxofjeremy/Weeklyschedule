@@ -7,7 +7,7 @@ import path from "path";
 import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const TMDB_API_KEY = "944017b839d3c040bdd2574083e4c1bc";
+const TMDB_API_KEY;
 
 const CATALOG_DIR = path.join(__dirname, "catalog", "series");
 const DISCOVERY_DAYS_BACK = 12; 
@@ -18,7 +18,6 @@ const RETENTION_DAYS_BACK = 9; // Only include shows with episodes aired within 
 // =================================================================================
 const TMDB_ID_OVERRIDES = {
   55238: 136009, // Force TVMaze Blankety Blank (2021) directly to TMDB 136009
-  92222: 324650  // Explicitly map Zombie House Flipping: Family Business to your verified TMDB ID
 };
 
 const TVMAZE_DELAY_MS = 250; // Increased spacing to proactively guard against 429 rate limiting
