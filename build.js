@@ -7,7 +7,7 @@ import path from "path";
 import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const TMDB_API_KEY;
+const TMDB_API_KEY =TMDB_API_KEY;
 
 const CATALOG_DIR = path.join(__dirname, "catalog", "series");
 const DISCOVERY_DAYS_BACK = 12; 
