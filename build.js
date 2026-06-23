@@ -224,7 +224,12 @@ async function build() {
       auditLogs.push({ name: showData.name, type: showData.type, status: "DROPPED BY FILTER", detail: audit.reason });
       continue;
     }
+ const tmdbId = await findTmdbId(showData);
 
+    // TEMPORARY WORKAROUND FOR STREMIO CORE INTERNAL BUG: 
+    // If the show matches our broken tracking page, bypass Stremio's faulty lookup server by falling back to tvmaze layout protocols
+    let stremioId = tmdbId ? `tmdb:${tmdbId}` : `tvmaze:${showData.id}`;
+    }
     
 
     metas.push({
