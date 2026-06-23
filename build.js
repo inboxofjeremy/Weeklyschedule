@@ -225,14 +225,7 @@ async function build() {
       continue;
     }
 
-    const tmdbId = await findTmdbId(showData);
     
-    // TEMPORARY WORKAROUND FOR STREMIO CORE INTERNAL BUG: 
-    // If the show matches our broken tracking page, bypass Stremio's faulty lookup server by falling back to tvmaze layout protocols
-    let stremioId = tmdbId ? `tmdb:${tmdbId}` : `tvmaze:${showData.id}`;
-    if (tmdbId === 324650) {
-      stremioId = `tvmaze:${showData.id}`;
-    }
 
     metas.push({
       id: stremioId,
