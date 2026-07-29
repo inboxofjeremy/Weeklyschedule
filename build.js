@@ -14,13 +14,13 @@ const DISCOVERY_DAYS_BACK = 12;
 const RETENTION_DAYS_BACK = 9; // Only include shows with episodes aired within this window
 
 // =================================================================================
-// STATIC OVERRIDES: Explicitly force correct ID configurations
+// STATIC OVERRIDES: Explicitly force correct ID configurations for edge cases
 // =================================================================================
 const TMDB_ID_OVERRIDES = {
   55238: 136009, // Force TVMaze Blankety Blank (2021) directly to TMDB 136009
 };
 
-const TVMAZE_DELAY_MS = 250; // Increased spacing to proactively guard against 429 rate limiting
+const TVMAZE_DELAY_MS = 250; 
 let lastTvmazeCall = 0;
 
 const auditLogs = [];
@@ -85,7 +85,6 @@ function evaluateExclusion(show) {
     return { exclude: true, reason: `Blocked Language (${lang})` };
   }
   
-  // PRIORITY PROTECTION: Whitelist home, renovation, and reality series before broad genre blocks strip them out
   const allowedGenres = ["panel", "quiz", "game show", "game-show", "reality", "home improvement", "renovation"];
   if (
     genres.some(g => allowedGenres.includes(g)) || 
@@ -96,7 +95,6 @@ function evaluateExclusion(show) {
     return { exclude: false, reason: "Allowed Reality/Renovation Content" };
   }
   
-  // Standard structural exclusions
   if (t === "sports" || genres.includes("sports")) return { exclude: true, reason: "Excluded: Sports" };
   if (t === "news" || t === "talk show" || genres.includes("news")) return { exclude: true, reason: "Excluded: News/Talk" };
   if (t === "documentary" || genres.includes("documentary")) {
@@ -143,12 +141,20 @@ async function findTmdbId(show) {
       const detailed = await fetchJSON(`https://api.themoviedb.org/3/tv/${candidate.id}?api_key=${TMDB_API_KEY}`);
       if (!detailed) continue;
 
+      const status = (detailed.status || "").toLowerCase();
+      const lastAirDate = detailed.last_air_date;
+      const lastEpAirDate = detailed.last_episode_to_air?.air_date;
+
+      // If the show is ended and its last air date is older than our active episode window, skip it
+      if (status === "ended" && lastAirDate && lastAirDate < earliestEp) {
+        continue;
+      }
+
       const tmdbStart = detailed.first_air_date || "0000-01-01";
-      const tmdbEnd = detailed.last_air_date || pacificDateString(new Date());
+      const tmdbEnd = lastAirDate || lastEpAirDate || pacificDateString(new Date());
 
       if (earliestEp <= tmdbEnd && latestEp >= tmdbStart) {
-        const status = (detailed.status || "").toLowerCase();
-        if (status.includes("returning") || status.includes("in production") || tmdbEnd >= earliestEp) {
+        if (status.includes("returning") || status.includes("in production") || (lastEpAirDate && lastEpAirDate >= earliestEp)) {
           return candidate.id;
         }
       }
@@ -208,7 +214,6 @@ async function build() {
   for (const showId of activeShowIds) {
     const showData = await fetchJSON(`https://api.tvmaze.com/shows/${showId}?embed=episodes`);
     
-    // CATCH RATE LIMITING: Prevent shows from vanishing cleanly without generating an audit log trace
     if (!showData) {
       console.warn(`[API ERROR] Empty response for TVMaze ID ${showId}. Likely hit a 429 rate limit or network drop.`);
       auditLogs.push({ 
@@ -226,15 +231,12 @@ async function build() {
       continue;
     }
     
- const tmdbId = await findTmdbId(showData);
+    const tmdbId = await findTmdbId(showData);
 
-    // TEMPORARY WORKAROUND FOR STREMIO CORE INTERNAL BUG: 
-    // If the show matches our broken tracking page, bypass Stremio's faulty lookup server by falling back to tvmaze layout protocols
     let stremioId = tmdbId ? `tmdb:${tmdbId}` : `tvmaze:${showData.id}`;
     if (tmdbId === 0) {
       stremioId = `tvmaze:${showData.id}`;
     }
-    
 
     metas.push({
       id: stremioId,
@@ -252,7 +254,6 @@ async function build() {
           const epAirDate = ep.airdate || (ep.airstamp ? ep.airstamp.split('T')[0] : null);
           const launchYear = showData.premiered ? showData.premiered.split("-")[0] : "2026";
           
-          // STRICT RESOLUTION FIX: Guard against null structural replacements. Always mirror current safe meta root
           const structuralNamespace = stremioId && !stremioId.includes('null') ? stremioId : `tvmaze:${showData.id}`;
           const videoId = `${structuralNamespace}:${sNum}:${eNum}`;
 
@@ -266,7 +267,6 @@ async function build() {
             released: epAirDate,
             overview: cleanHTML(ep.summary || ""),
             
-            // EMERGENCY FALLBACK SCRAPER INJECTIONS: Forces raw queries when TMDB templates resolve empty
             name: fallbackString,
             series: showData.name,
             fallback_title: fallbackString,
@@ -287,10 +287,9 @@ async function build() {
   cutoffTarget.setDate(cutoffTarget.getDate() - RETENTION_DAYS_BACK);
   const cutoffStr = pacificDateString(cutoffTarget);
 
-  // AUTOMATED RETENTION WINDOW EVALUATION
   const filteredMetas = metas.filter(show => {
     const latest = getLatestValidDate(show, todayStr);
-    const isKeep = latest >= cutoffStr && latest <= todayStr; // Must have an episode in the 9-day window
+    const isKeep = latest >= cutoffStr && latest <= todayStr; 
     
     if (isKeep) {
       auditLogs.push({ name: show.name, type: "Series/Reality", status: "KEPT", detail: `Latest airdate: ${latest}` });
@@ -316,7 +315,7 @@ async function build() {
   fs.writeFileSync(filePath, JSON.stringify({ metas: finalMetas }, null, 2));
 
   console.log("\n=================================================================================");
-  console.log("                    FINAL PIPELINE PROCESSING SUMMARY REPORT                      ");
+  console.log("                    FINAL PIPELINE PROCESSING SUMMARY REPORT                     ");
   console.log("=================================================================================");
   console.table(auditLogs);
   console.log("=================================================================================\n");
