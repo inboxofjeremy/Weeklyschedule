@@ -18,6 +18,7 @@ const RETENTION_DAYS_BACK = 9; // Only include shows with episodes aired within 
 // =================================================================================
 const TMDB_ID_OVERRIDES = {
   55238: 136009, // Force TVMaze Blankety Blank (2021) directly to TMDB 136009
+  // [TVMaze_ID]: 101962, // Uncomment and add your TVMaze ID here for Who Wants to Be a Millionaire to map to TMDB 101962
 };
 
 const TVMAZE_DELAY_MS = 250; // Increased spacing to proactively guard against 429 rate limiting
@@ -118,37 +119,43 @@ async function findTmdbId(show) {
     imdb = full?.externals?.imdb;
   }
   
+  const tvmazeYearStr = show.premiered ? show.premiered.split("-")[0] : null;
+  const tvmazeYear = tvmazeYearStr ? parseInt(tvmazeYearStr, 10) : null;
+  
   const normalizeTitle = str => (str || "").toLowerCase().replace(/[^a-z0-9]/g, "").trim();
   const targetNormalized = normalizeTitle(show.name);
 
   if (imdb) {
     const data = await fetchJSON(`https://api.themoviedb.org/3/find/${imdb}?api_key=${TMDB_API_KEY}&external_source=imdb_id`);
     if (data?.tv_results?.length) {
-      return data.tv_results[0].id;
+      const match = data.tv_results[0];
+      const tmdbYearStr = match.first_air_date ? match.first_air_date.split("-")[0] : null;
+      const tmdbYear = tmdbYearStr ? parseInt(tmdbYearStr, 10) : null;
+      
+      if (!tvmazeYear || !tmdbYear || Math.abs(tmdbYear - tvmazeYear) <= 1) {
+        return match.id;
+      }
+      console.log(`[Mismatch Warning] IMDb ID ${imdb} linked to wrong era. Falling back to search window.`);
     }
   }
   
   const search = await fetchJSON(`https://api.themoviedb.org/3/search/tv?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(show.name)}`);
   if (!search?.results?.length) return null;
   
-  const tvmazeEpisodes = show._embedded?.episodes || [];
-  const matchingResults = search.results.filter(r => normalizeTitle(r.name) === targetNormalized);
-
-  if (matchingResults.length > 1 && tvmazeEpisodes.length > 0) {
-    const dates = tvmazeEpisodes.map(e => e.airdate || (e.airstamp ? e.airstamp.split('T')[0] : null)).filter(Boolean).sort();
-    const earliestEp = dates[0];
-    const latestEp = dates[dates.length - 1];
-
-    const bestFit = matchingResults.find(r => {
-      const tmdbStart = r.first_air_date || "0000-01-01";
-      const tmdbEnd = r.last_air_date || "9999-12-31";
-      return earliestEp >= tmdbStart && latestEp <= tmdbEnd;
+  if (tvmazeYear) {
+    const strictYearMatch = search.results.find(r => {
+      const tmdbYearStr = r.first_air_date ? r.first_air_date.split("-")[0] : null;
+      const tmdbYear = tmdbYearStr ? parseInt(tmdbYearStr, 10) : null;
+      
+      const isTitleMatch = normalizeTitle(r.name) === targetNormalized;
+      const isWithinYearWindow = tmdbYear && Math.abs(tmdbYear - tvmazeYear) <= 1;
+      
+      return isTitleMatch && isWithinYearWindow;
     });
-
-    if (bestFit) return bestFit.id;
+    if (strictYearMatch) return strictYearMatch.id;
   }
 
-  const stringMatch = matchingResults[0];
+  const stringMatch = search.results.find(r => normalizeTitle(r.name) === targetNormalized);
   if (stringMatch) return stringMatch.id;
 
   return search.results[0].id;
