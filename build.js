@@ -14,10 +14,10 @@ const DISCOVERY_DAYS_BACK = 12;
 const RETENTION_DAYS_BACK = 9; // Only include shows with episodes aired within this window
 
 // =================================================================================
-// STATIC OVERRIDES: Explicitly force correct ID configurations for edge cases
+// STATIC OVERRIDES: Optional fallback map (rarely needed now)
 // =================================================================================
 const TMDB_ID_OVERRIDES = {
-  55238: 136009, // Force TVMaze Blankety Blank (2021) directly to TMDB 136009
+  55238: 136009, 
 };
 
 const TVMAZE_DELAY_MS = 250; 
@@ -106,21 +106,20 @@ function evaluateExclusion(show) {
 
 async function findTmdbId(show) {
   if (TMDB_ID_OVERRIDES[show.id]) {
-    console.log(`[Override Triggered] Explicitly mapping TVMaze ${show.id} to TMDB ${TMDB_ID_OVERRIDES[show.id]}`);
     return TMDB_ID_OVERRIDES[show.id];
   }
 
-  let imdb = show?.externals?.imdb;
-  if (!imdb) {
-    const full = await fetchJSON(`https://api.tvmaze.com/shows/${show.id}`);
-    imdb = full?.externals?.imdb;
-  }
-  
   const normalizeTitle = str => (str || "").toLowerCase().replace(/[^a-z0-9]/g, "").trim();
   const targetNormalized = normalizeTitle(show.name);
-  const tvmazeEpisodes = show._embedded?.episodes || [];
+  
+  // Search TMDB purely by title to find all candidate versions dynamically
+  const search = await fetchJSON(`https://api.themoviedb.org/3/search/tv?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(show.name)}`);
+  if (!search?.results?.length) return null;
 
-  // Extract date window bounds from TVMaze episodes if available
+  const matchingResults = search.results.filter(r => normalizeTitle(r.name) === targetNormalized);
+  if (matchingResults.length === 0) return search.results[0].id;
+
+  const tvmazeEpisodes = show._embedded?.episodes || [];
   let earliestEp = "0000-01-01";
   let latestEp = "9999-12-31";
   if (tvmazeEpisodes.length > 0) {
@@ -131,66 +130,37 @@ async function findTmdbId(show) {
     }
   }
 
-  // Validate IMDb result against active dates and status before accepting it
-  if (imdb) {
-    const data = await fetchJSON(`https://api.themoviedb.org/3/find/${imdb}?api_key=${TMDB_API_KEY}&external_source=imdb_id`);
-    if (data?.tv_results?.length) {
-      const candidateId = data.tv_results[0].id;
-      const detailed = await fetchJSON(`https://api.themoviedb.org/3/tv/${candidateId}?api_key=${TMDB_API_KEY}`);
-      if (detailed) {
-        const status = (detailed.status || "").toLowerCase();
-        const lastAirDate = detailed.last_air_date;
-        const tmdbStart = detailed.first_air_date || "0000-01-01";
-        const tmdbEnd = lastAirDate || pacificDateString(new Date());
+  // Fetch detailed info for all matching TMDB candidates to evaluate status and air dates dynamically
+  const scoredCandidates = [];
+  for (const candidate of matchingResults) {
+    const detailed = await fetchJSON(`https://api.themoviedb.org/3/tv/${candidate.id}?api_key=${TMDB_API_KEY}`);
+    if (!detailed) continue;
 
-        let isImdbValid = true;
-        if (status === "ended" && lastAirDate && lastAirDate < earliestEp) {
-          isImdbValid = false;
-        }
-        if (!(earliestEp <= tmdbEnd && latestEp >= tmdbStart)) {
-          isImdbValid = false;
-        }
+    const status = (detailed.status || "").toLowerCase();
+    const tmdbStart = detailed.first_air_date || "0000-01-01";
+    const tmdbEnd = detailed.last_air_date || pacificDateString(new Date());
 
-        if (isImdbValid) {
-          return candidateId;
-        }
-      }
+    let score = 0;
+    // Prioritize shows that are currently returning or in production
+    if (status.includes("returning") || status.includes("in production")) {
+      score += 100;
     }
-  }
-  
-  const search = await fetchJSON(`https://api.themoviedb.org/3/search/tv?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(show.name)}`);
-  if (!search?.results?.length) return null;
-
-  const matchingResults = search.results.filter(r => normalizeTitle(r.name) === targetNormalized);
-
-  if (matchingResults.length > 0 && tvmazeEpisodes.length > 0) {
-    for (const candidate of matchingResults) {
-      const detailed = await fetchJSON(`https://api.themoviedb.org/3/tv/${candidate.id}?api_key=${TMDB_API_KEY}`);
-      if (!detailed) continue;
-
-      const status = (detailed.status || "").toLowerCase();
-      const lastAirDate = detailed.last_air_date;
-      const lastEpAirDate = detailed.last_episode_to_air?.air_date;
-
-      if (status === "ended" && lastAirDate && lastAirDate < earliestEp) {
-        continue;
-      }
-
-      const tmdbStart = detailed.first_air_date || "0000-01-01";
-      const tmdbEnd = lastAirDate || lastEpAirDate || pacificDateString(new Date());
-
-      if (earliestEp <= tmdbEnd && latestEp >= tmdbStart) {
-        if (status.includes("returning") || status.includes("in production") || (lastEpAirDate && lastEpAirDate >= earliestEp)) {
-          return candidate.id;
-        }
-      }
+    // Prioritize shows whose broadcast window overlaps with the TVMaze episode dates
+    if (earliestEp <= tmdbEnd && latestEp >= tmdbStart) {
+      score += 50;
     }
+    // Bonus for more recent last air date
+    score += (new Date(tmdbEnd).getTime() / 1000000000);
+
+    scoredCandidates.push({ id: candidate.id, score });
   }
 
-  const stringMatch = matchingResults[0];
-  if (stringMatch) return stringMatch.id;
+  if (scoredCandidates.length > 0) {
+    scoredCandidates.sort((a, b) => b.score - a.score);
+    return scoredCandidates[0].id;
+  }
 
-  return search.results[0].id;
+  return matchingResults[0].id;
 }
 
 async function build() {
