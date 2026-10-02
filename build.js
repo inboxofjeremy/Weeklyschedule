@@ -109,6 +109,9 @@ async function findTmdbId(show) {
     return TMDB_ID_OVERRIDES[show.id];
   }
 
+  // Extract TVMaze country for cross-referencing
+  const tvmazeCountry = show.network?.country?.code || show.webChannel?.country?.code;
+
   const normalizeTitle = str => (str || "").toLowerCase().replace(/[^a-z0-9]/g, "").trim();
   const targetNormalized = normalizeTitle(show.name);
   
@@ -141,6 +144,13 @@ async function findTmdbId(show) {
     const tmdbEnd = detailed.last_air_date || pacificDateString(new Date());
 
     let score = 0;
+
+    // Apply country match bonus
+    const tmdbCountries = detailed.origin_country || [];
+    if (tvmazeCountry && tmdbCountries.includes(tvmazeCountry)) {
+      score += 500;
+    }
+
     // Prioritize shows that are currently returning or in production
     if (status.includes("returning") || status.includes("in production")) {
       score += 100;
