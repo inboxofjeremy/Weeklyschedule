@@ -238,9 +238,13 @@ async function build() {
     }
     
     const tmdbId = await findTmdbId(showData);
-
-    let stremioId = tmdbId ? `tmdb:${tmdbId}` : `tvmaze:${showData.id}`;
-    if (tmdbId === 0) {
+    
+    // NEW LOGIC: Prioritize IMDb ID for Wako scraper compatibility
+    const imdbId = showData.externals?.imdb;
+    
+    let stremioId = imdbId ? imdbId : (tmdbId ? `tmdb:${tmdbId}` : `tvmaze:${showData.id}`);
+    // Fallback safely if there is no imdbId and the TMDB search failed
+    if (!imdbId && tmdbId === 0) {
       stremioId = `tvmaze:${showData.id}`;
     }
 
@@ -261,7 +265,7 @@ async function build() {
           const launchYear = showData.premiered ? showData.premiered.split("-")[0] : "2026";
           
           const structuralNamespace = stremioId && !stremioId.includes('null') ? stremioId : `tvmaze:${showData.id}`;
-          const videoId = `${structuralNamespace}:${sNum}:${eNum}`;
+          const videoId = `${structuralNamespace}:${sNum}:${eNum}`; // This now creates tt1234567:1:1
 
           const fallbackString = `${showData.name} S${String(sNum).padStart(2, '0')}E${String(eNum).padStart(2, '0')}`;
 
