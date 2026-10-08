@@ -1,5 +1,5 @@
 /**
- * build.js — Stremio static catalog
+ * build.js — Stremio & Wako compatible static catalog
  */
 
 import fs from "fs";
@@ -254,12 +254,13 @@ async function build() {
     const tmdbId = await findTmdbId(showData);
     const imdbId = await getImdbId(showData, tmdbId);
     
+    // Set canonical ID for Stremio & Wako scraper engines
     let stremioId = imdbId || (tmdbId ? `tmdb:${tmdbId}` : `tvmaze:${showData.id}`);
 
     metas.push({
       id: stremioId,
-      imdb_id: imdbId || null,
-      tmdb_id: tmdbId || null,
+      imdb_id: imdbId || undefined,
+      tmdb_id: tmdbId || undefined,
       tvmazeId: showData.id,
       type: "series",
       name: showData.name,
@@ -271,8 +272,8 @@ async function build() {
       videos: (showData._embedded?.episodes || [])
         .sort((a, b) => (a.season - b.season) || (a.number - b.number))
         .map(ep => {
-          const sNum = ep.season || 1;
-          const eNum = ep.number || 0;
+          const sNum = Number(ep.season || 1);
+          const eNum = Number(ep.number || 0);
           const epAirDate = ep.airdate || (ep.airstamp ? ep.airstamp.split('T')[0] : null);
           const launchYear = showData.premiered ? showData.premiered.split("-")[0] : "2026";
           
@@ -283,9 +284,11 @@ async function build() {
 
           return {
             id: videoId,
-            title: ep.name || `Episode ${eNum}`,
+            imdb_id: imdbId || undefined, // CRITICAL FOR WAKO: Attached to every episode
             season: sNum,
             episode: eNum,
+            number: eNum,                 // CRITICAL FOR WAKO: Explicit number integer
+            title: ep.name || `Episode ${eNum}`,
             released: epAirDate,
             overview: cleanHTML(ep.summary || ""),
             
