@@ -173,6 +173,20 @@ async function findTmdbId(show) {
   return matchingResults[0].id;
 }
 
+// Fetch IMDb ID from TVMaze or fallback to TMDB external IDs
+async function getImdbId(showData, tmdbId) {
+  if (showData.externals?.imdb) {
+    return showData.externals.imdb;
+  }
+  if (tmdbId) {
+    const ext = await fetchJSON(`https://api.themoviedb.org/3/tv/${tmdbId}/external_ids?api_key=${TMDB_API_KEY}`);
+    if (ext?.imdb_id) {
+      return ext.imdb_id;
+    }
+  }
+  return null;
+}
+
 async function build() {
   const activeShowIds = new Set();
   const targetCountries = ["US", "GB", "CA", "AU", "NZ"];
@@ -238,21 +252,19 @@ async function build() {
     }
     
     const tmdbId = await findTmdbId(showData);
+    const imdbId = await getImdbId(showData, tmdbId);
     
-    // NEW LOGIC: Prioritize IMDb ID for Wako scraper compatibility
-    const imdbId = showData.externals?.imdb;
-    
-    let stremioId = imdbId ? imdbId : (tmdbId ? `tmdb:${tmdbId}` : `tvmaze:${showData.id}`);
-    // Fallback safely if there is no imdbId and the TMDB search failed
-    if (!imdbId && tmdbId === 0) {
-      stremioId = `tvmaze:${showData.id}`;
-    }
+    let stremioId = imdbId || (tmdbId ? `tmdb:${tmdbId}` : `tvmaze:${showData.id}`);
 
     metas.push({
       id: stremioId,
+      imdb_id: imdbId || null,
+      tmdb_id: tmdbId || null,
       tvmazeId: showData.id,
       type: "series",
       name: showData.name,
+      genres: showData.genres || [],
+      year: showData.premiered ? showData.premiered.split("-")[0] : undefined,
       description: cleanHTML(showData.summary),
       poster: showData.image?.original || showData.image?.medium || null,
       background: showData.image?.original || null,
@@ -265,7 +277,7 @@ async function build() {
           const launchYear = showData.premiered ? showData.premiered.split("-")[0] : "2026";
           
           const structuralNamespace = stremioId && !stremioId.includes('null') ? stremioId : `tvmaze:${showData.id}`;
-          const videoId = `${structuralNamespace}:${sNum}:${eNum}`; // This now creates tt1234567:1:1
+          const videoId = `${structuralNamespace}:${sNum}:${eNum}`;
 
           const fallbackString = `${showData.name} S${String(sNum).padStart(2, '0')}E${String(eNum).padStart(2, '0')}`;
 
