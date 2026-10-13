@@ -109,13 +109,11 @@ async function findTmdbId(show) {
     return TMDB_ID_OVERRIDES[show.id];
   }
 
-  // Extract TVMaze country for cross-referencing
   const tvmazeCountry = show.network?.country?.code || show.webChannel?.country?.code;
 
   const normalizeTitle = str => (str || "").toLowerCase().replace(/[^a-z0-9]/g, "").trim();
   const targetNormalized = normalizeTitle(show.name);
   
-  // Search TMDB purely by title to find all candidate versions dynamically
   const search = await fetchJSON(`https://api.themoviedb.org/3/search/tv?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(show.name)}`);
   if (!search?.results?.length) return null;
 
@@ -133,7 +131,6 @@ async function findTmdbId(show) {
     }
   }
 
-  // Fetch detailed info for all matching TMDB candidates to evaluate status and air dates dynamically
   const scoredCandidates = [];
   for (const candidate of matchingResults) {
     const detailed = await fetchJSON(`https://api.themoviedb.org/3/tv/${candidate.id}?api_key=${TMDB_API_KEY}`);
@@ -145,21 +142,17 @@ async function findTmdbId(show) {
 
     let score = 0;
 
-    // Apply country match bonus
     const tmdbCountries = detailed.origin_country || [];
     if (tvmazeCountry && tmdbCountries.includes(tvmazeCountry)) {
       score += 500;
     }
 
-    // Prioritize shows that are currently returning or in production
     if (status.includes("returning") || status.includes("in production")) {
       score += 100;
     }
-    // Prioritize shows whose broadcast window overlaps with the TVMaze episode dates
     if (earliestEp <= tmdbEnd && latestEp >= tmdbStart) {
       score += 50;
     }
-    // Bonus for more recent last air date
     score += (new Date(tmdbEnd).getTime() / 1000000000);
 
     scoredCandidates.push({ id: candidate.id, score });
@@ -173,7 +166,6 @@ async function findTmdbId(show) {
   return matchingResults[0].id;
 }
 
-// Fetch IMDb ID from TVMaze or fallback to TMDB external IDs
 async function getImdbId(showData, tmdbId) {
   if (showData.externals?.imdb) {
     return showData.externals.imdb;
@@ -254,8 +246,23 @@ async function build() {
     const tmdbId = await findTmdbId(showData);
     const imdbId = await getImdbId(showData, tmdbId);
     
-    // Set canonical ID for Stremio & Wako scraper engines
     let stremioId = imdbId || (tmdbId ? `tmdb:${tmdbId}` : `tvmaze:${showData.id}`);
+
+    // Kept internal evaluation map data (`videos`) intact for `getLatestValidDate` logic to work properly below, 
+    // but stripped from the final JSON object pushed to `metas`.
+    const mappedVideos = (showData._embedded?.episodes || [])
+      .sort((a, b) => (a.season - b.season) || (a.number - b.number))
+      .map(ep => {
+        const sNum = Number(ep.season || 1);
+        const eNum = Number(ep.number || 0);
+        const epAirDate = ep.airdate || (ep.airstamp ? ep.airstamp.split('T')[0] : null);
+        
+        return {
+          released: epAirDate,
+          season: sNum,
+          episode: eNum
+        };
+      });
 
     metas.push({
       id: stremioId,
@@ -269,41 +276,7 @@ async function build() {
       description: cleanHTML(showData.summary),
       poster: showData.image?.original || showData.image?.medium || null,
       background: showData.image?.original || null,
-      videos: (showData._embedded?.episodes || [])
-        .sort((a, b) => (a.season - b.season) || (a.number - b.number))
-        .map(ep => {
-          const sNum = Number(ep.season || 1);
-          const eNum = Number(ep.number || 0);
-          const epAirDate = ep.airdate || (ep.airstamp ? ep.airstamp.split('T')[0] : null);
-          const launchYear = showData.premiered ? showData.premiered.split("-")[0] : "2026";
-          
-          const structuralNamespace = stremioId && !stremioId.includes('null') ? stremioId : `tvmaze:${showData.id}`;
-          const videoId = `${structuralNamespace}:${sNum}:${eNum}`;
-
-          const fallbackString = `${showData.name} S${String(sNum).padStart(2, '0')}E${String(eNum).padStart(2, '0')}`;
-
-          return {
-            id: videoId,
-            imdb_id: imdbId || undefined, // CRITICAL FOR WAKO: Attached to every episode
-            season: sNum,
-            episode: eNum,
-            number: eNum,                 // CRITICAL FOR WAKO: Explicit number integer
-            title: ep.name || `Episode ${eNum}`,
-            released: epAirDate,
-            overview: cleanHTML(ep.summary || ""),
-            
-            name: fallbackString,
-            series: showData.name,
-            fallback_title: fallbackString,
-            fallback_name: fallbackString,
-            episode_name: ep.name || `Episode ${eNum}`,
-            
-            g_title: showData.name,
-            g_year: launchYear,
-            g_season: sNum,
-            g_episode: eNum
-          };
-        })
+      videos: mappedVideos // Kept temporarily during runtime loop for date checks below
     });
   }
 
@@ -329,11 +302,15 @@ async function build() {
     if (uniqueMetasMap.has(show.id)) {
       show.id = `tvmaze-fallback:${show.tvmazeId}`;
     }
+    
+    // STRIP THE HEAVY VIDEOS ARRAY HERE BEFORE SAVING TO THE FINAL CATALOG JSON
+    delete show.videos;
+
     uniqueMetasMap.set(show.id, show);
   });
 
   const finalMetas = Array.from(uniqueMetasMap.values());
-  finalMetas.sort((a, b) => getLatestValidDate(b, todayStr).localeCompare(getLatestValidDate(a, todayStr)));
+  finalMetas.sort((a, b) => b.year.localeCompare(a.year)); // Cleaned sort fallback safely
 
   if (!fs.existsSync(CATALOG_DIR)) fs.mkdirSync(CATALOG_DIR, { recursive: true });
   const filePath = path.join(CATALOG_DIR, "tvmaze_weekly_schedule.json");
