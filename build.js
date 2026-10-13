@@ -248,8 +248,6 @@ async function build() {
     
     let stremioId = (tmdbId ? `tmdb:${tmdbId}` : null) || imdbId || `tvmaze:${showData.id}`;
 
-    // Kept internal evaluation map data (`videos`) intact for `getLatestValidDate` logic to work properly below, 
-    // but stripped from the final JSON object pushed to `metas`.
     const mappedVideos = (showData._embedded?.episodes || [])
       .sort((a, b) => (a.season - b.season) || (a.number - b.number))
       .map(ep => {
@@ -276,7 +274,7 @@ async function build() {
       description: cleanHTML(showData.summary),
       poster: showData.image?.original || showData.image?.medium || null,
       background: showData.image?.original || null,
-      videos: mappedVideos // Kept temporarily during runtime loop for date checks below
+      videos: mappedVideos 
     });
   }
 
@@ -302,15 +300,18 @@ async function build() {
     if (uniqueMetasMap.has(show.id)) {
       show.id = `tvmaze-fallback:${show.tvmazeId}`;
     }
-    
-    // STRIP THE HEAVY VIDEOS ARRAY HERE BEFORE SAVING TO THE FINAL CATALOG JSON
-    delete show.videos;
-
     uniqueMetasMap.set(show.id, show);
   });
 
   const finalMetas = Array.from(uniqueMetasMap.values());
-  finalMetas.sort((a, b) => getLatestValidDate(b, todayStr).localeCompare(getLatestValidDate(a, todayStr)));// Cleaned sort fallback safely
+  
+  // 1. Sort using the active videos data BEFORE stripping it
+  finalMetas.sort((a, b) => getLatestValidDate(b, todayStr).localeCompare(getLatestValidDate(a, todayStr)));
+
+  // 2. Strip the heavy videos array right before writing out the final file
+  finalMetas.forEach(show => {
+    delete show.videos;
+  });
 
   if (!fs.existsSync(CATALOG_DIR)) fs.mkdirSync(CATALOG_DIR, { recursive: true });
   const filePath = path.join(CATALOG_DIR, "tvmaze_weekly_schedule.json");
