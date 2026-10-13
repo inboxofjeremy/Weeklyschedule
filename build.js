@@ -310,7 +310,7 @@ async function build() {
   });
 
   const finalMetas = Array.from(uniqueMetasMap.values());
-  finalMetas.sort((a, b) => b.year.localeCompare(a.year)); // Cleaned sort fallback safely
+  finalMetas.sort((a, b) => getLatestValidDate(b, todayStr).localeCompare(getLatestValidDate(a, todayStr)));// Cleaned sort fallback safely
 
   if (!fs.existsSync(CATALOG_DIR)) fs.mkdirSync(CATALOG_DIR, { recursive: true });
   const filePath = path.join(CATALOG_DIR, "tvmaze_weekly_schedule.json");
