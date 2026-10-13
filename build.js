@@ -246,7 +246,7 @@ async function build() {
     const tmdbId = await findTmdbId(showData);
     const imdbId = await getImdbId(showData, tmdbId);
     
-    let stremioId = imdbId || (tmdbId ? `tmdb:${tmdbId}` : `tvmaze:${showData.id}`);
+    let stremioId = (tmdbId ? `tmdb:${tmdbId}` : null) || imdbId || `tvmaze:${showData.id}`;
 
     // Kept internal evaluation map data (`videos`) intact for `getLatestValidDate` logic to work properly below, 
     // but stripped from the final JSON object pushed to `metas`.
