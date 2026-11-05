@@ -1,6 +1,6 @@
 /**
  * build.js — Stremio & Wako compatible static adult catalog
- * TMDB Daily Discover (9-Day Window, Multi-Page Discovery)
+ * TMDB Daily Discover (9-Day Window, Dynamic Pagination)
  * Strictly preserves all original rules + blocks short vertical dramas & wrestling content.
  */
 
@@ -18,7 +18,7 @@ if (!TMDB_API_KEY || TMDB_API_KEY.trim() === "") {
 
 const CATALOG_DIR = path.join(__dirname, "catalog", "series");
 const RETENTION_DAYS_BACK = 9; // 9-day rolling window
-const PAGES_PER_DAY = 5; // Fetch up to 5 pages (100 shows) per day
+const MAX_PAGES_CAP = 10; // Dynamic cap (up to 200 shows max per day)
 
 const auditLogs = [];
 
@@ -151,26 +151,33 @@ function evaluateExclusion(showName, tmdbMeta) {
 async function build() {
   const discoveredShows = new Map(); // tmdbId -> latestAirDate
 
-  console.log(`Discovering English adult shows from TMDB across the past ${RETENTION_DAYS_BACK} days (${PAGES_PER_DAY} pages per day)...`);
+  console.log(`Discovering English adult shows from TMDB across the past ${RETENTION_DAYS_BACK} days (Dynamic Pagination up to ${MAX_PAGES_CAP} pages per day)...`);
 
-  // Query TMDB Discover per day across multiple pages
+  // Dynamic discovery loop
   for (let i = 0; i < RETENTION_DAYS_BACK; i++) {
     const d = new Date();
     d.setDate(d.getDate() - i);
     const dateStr = pacificDateString(d);
 
-    for (let page = 1; page <= PAGES_PER_DAY; page++) {
+    let page = 1;
+    let totalPages = 1;
+
+    do {
       const discoverUrl = `https://api.themoviedb.org/3/discover/tv?api_key=${TMDB_API_KEY}&air_date.gte=${dateStr}&air_date.lte=${dateStr}&with_original_language=en&sort_by=popularity.desc&page=${page}`;
       const data = await fetchJSON(discoverUrl);
 
       if (data?.results) {
+        // Read actual total pages available for this specific date
+        totalPages = Math.min(data.total_pages || 1, MAX_PAGES_CAP);
+
         for (const show of data.results) {
           if (!discoveredShows.has(show.id)) {
             discoveredShows.set(show.id, dateStr);
           }
         }
       }
-    }
+      page++;
+    } while (page <= totalPages);
   }
 
   console.log(`Discovered ${discoveredShows.size} unique candidate shows. Evaluating metadata...`);
