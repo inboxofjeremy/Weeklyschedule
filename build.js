@@ -1,5 +1,6 @@
 /**
- * build.js — Stremio & Wako compatible static catalog
+ * build.js — Stremio & Wako compatible static adult catalog
+ * TMDB Daily Discover (9-Day Window)
  */
 
 import fs from "fs";
@@ -9,35 +10,22 @@ import { fileURLToPath } from 'url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TMDB_API_KEY = process.env.TMDB_API_KEY;
 
+if (!TMDB_API_KEY || TMDB_API_KEY.trim() === "") {
+  console.error("\n❌ ERROR: TMDB_API_KEY environment variable is not defined or is empty!\n");
+  process.exit(1);
+}
+
 const CATALOG_DIR = path.join(__dirname, "catalog", "series");
-const DISCOVERY_DAYS_BACK = 12; 
-const RETENTION_DAYS_BACK = 9; // Only include shows with episodes aired within this window
-
-// =================================================================================
-// STATIC OVERRIDES: Optional fallback map (rarely needed now)
-// =================================================================================
-const TMDB_ID_OVERRIDES = {
-  55238: 136009, 
-};
-
-const TVMAZE_DELAY_MS = 250; 
-let lastTvmazeCall = 0;
+const RETENTION_DAYS_BACK = 9; // 9-day rolling window
 
 const auditLogs = [];
 
 async function fetchJSON(url) {
   try {
-    if (url.includes("api.tvmaze.com")) {
-      const wait = Math.max(0, TVMAZE_DELAY_MS - (Date.now() - lastTvmazeCall));
-      if (wait) await new Promise(r => setTimeout(r, wait));
-      lastTvmazeCall = Date.now();
-    }
     const res = await fetch(url);
     return res.ok ? await res.json() : null;
   } catch { return null; }
 }
-
-const cleanHTML = s => s ? s.replace(/<[^>]+>/g, "").trim() : "";
 
 function pacificDateString(date = new Date()) {
   const parts = new Intl.DateTimeFormat("en-CA", {
@@ -50,278 +38,156 @@ function pacificDateString(date = new Date()) {
   return `${map.year}-${map.month}-${map.day}`;
 }
 
-function getLatestValidDate(show, todayStr) {
-  let maxDate = "0000-00-00";
-  if (!show.videos) return maxDate;
+async function getTmdbMetadata(tmdbId, country = "US") {
+  if (!tmdbId) return null;
   
-  for (let i = 0; i < show.videos.length; i++) {
-    const d = show.videos[i].released;
-    if (d && typeof d === 'string' && d.includes('-') && d <= todayStr) {
-      if (d > maxDate) {
-        maxDate = d;
-      }
-    }
-  }
-  return maxDate;
+  const [details, ratingsData, externalIds] = await Promise.all([
+    fetchJSON(`https://api.themoviedb.org/3/tv/${tmdbId}?api_key=${TMDB_API_KEY}`),
+    fetchJSON(`https://api.themoviedb.org/3/tv/${tmdbId}/content_ratings?api_key=${TMDB_API_KEY}`),
+    fetchJSON(`https://api.themoviedb.org/3/tv/${tmdbId}/external_ids?api_key=${TMDB_API_KEY}`)
+  ]);
+
+  if (!details) return null;
+
+  const ratingObj = ratingsData?.results?.find(r => r.iso_3166_1 === country) || ratingsData?.results?.[0];
+  
+  return {
+    details,
+    certification: ratingObj ? ratingObj.rating : null,
+    imdbId: externalIds?.imdb_id || null,
+    genres: details.genres ? details.genres.map(g => g.name) : [],
+    originalLanguage: details.original_language,
+    networks: (details.networks || []).map(n => n.name)
+  };
 }
 
-function evaluateExclusion(show) {
-  const name = (show.name || "").toLowerCase();
-  const t = (show.type || "").toLowerCase();
-  const genres = (show.genres || []).map(g => g.toLowerCase());
-  const lang = (show.language || "").toLowerCase();
-  const webChannel = (show.webChannel?.name || "").toLowerCase();
-  const network = (show.network?.name || "").toLowerCase();
+function evaluateExclusion(showName, tmdbMeta) {
+  const name = (showName || "").toLowerCase();
+  const genres = (tmdbMeta.genres || []).map(g => g.toLowerCase());
+  const lang = (tmdbMeta.originalLanguage || "").toLowerCase();
+  const networks = (tmdbMeta.networks || []).map(n => n.toLowerCase());
 
-  if (name.includes("blankety blank")) return { exclude: false, reason: "Whitelisted" };
+  // 1. Language & Foreign Script Checks
+  if (lang !== "en") {
+    return { exclude: true, reason: `Excluded: Non-English language (${lang})` };
+  }
 
-  const blockedNetworks = ["iqiyi", "bilibili", "wavve", "youku", "tencent qq", "vivaone", "premier", "смотрим", "кион", "geo entertainment", "tokyo mx"];
-  if (blockedNetworks.includes(webChannel) || blockedNetworks.includes(network)) {
-    return { exclude: true, reason: `Blocked Network (${webChannel || network})` };
+  const nonEnglishCharRegex = /[\u4e00-\u9fa5\u3040-\u30ff\u3130-\u318f\u0400-\u04ff]/;
+  if (nonEnglishCharRegex.test(showName)) {
+    return { exclude: true, reason: `Excluded: Contains foreign script (${showName})` };
   }
-  
-  const blockedLanguages = ["chinese", "japanese", "russian", "mandarin", "cantonese", "korean", "hindi", "thai", "spanish", "norwegian", "hungarian", "dutch", "swedish", "portuguese", "urdu", "turkish", "hebrew"];
-  if (blockedLanguages.includes(lang)) {
-    return { exclude: true, reason: `Blocked Language (${lang})` };
+
+  // 2. Whitelist Overrides
+  if (name.includes("blankety blank")) {
+    return { exclude: false, reason: "Whitelisted" };
   }
-  
+
+  // 3. Blocked Networks
+  const blockedNetworks = [
+    "iqiyi", "bilibili", "wavve", "youku", "tencent qq", "vivaone", 
+    "premier", "смотрим", "кион", "geo entertainment", "tokyo mx"
+  ];
+  if (networks.some(net => blockedNetworks.some(b => net.includes(b)))) {
+    return { exclude: true, reason: `Excluded: Blocked Network (${networks.join(', ')})` };
+  }
+
+  // 4. Allowed Reality / Renovation / Game Shows
   const allowedGenres = ["panel", "quiz", "game show", "game-show", "reality", "home improvement", "renovation"];
   if (
-    genres.some(g => allowedGenres.includes(g)) || 
-    t === "reality" || 
+    genres.some(g => allowedGenres.some(a => g.includes(a))) || 
     name.includes("zombie") || 
     name.includes("beach")
   ) {
     return { exclude: false, reason: "Allowed Reality/Renovation Content" };
   }
-  
-  if (t === "sports" || genres.includes("sports")) return { exclude: true, reason: "Excluded: Sports" };
-  if (t === "news" || t === "talk show" || genres.includes("news")) return { exclude: true, reason: "Excluded: News/Talk" };
-  if (t === "documentary" || genres.includes("documentary")) {
+
+  // 5. Excluded Categories (Sports, News, Talk, Pure Documentary)
+  if (genres.some(g => g.includes("sports"))) {
+    return { exclude: true, reason: "Excluded: Sports" };
+  }
+  if (genres.some(g => g.includes("news") || g.includes("talk"))) {
+    return { exclude: true, reason: "Excluded: News/Talk" };
+  }
+  if (genres.some(g => g === "documentary")) {
     return { exclude: true, reason: "Excluded: Pure Documentary" };
   }
-  
+
   return { exclude: false, reason: "Passed general rules" };
 }
 
-async function findTmdbId(show) {
-  if (TMDB_ID_OVERRIDES[show.id]) {
-    return TMDB_ID_OVERRIDES[show.id];
-  }
-
-  const tvmazeCountry = show.network?.country?.code || show.webChannel?.country?.code;
-
-  const normalizeTitle = str => (str || "").toLowerCase().replace(/[^a-z0-9]/g, "").trim();
-  const targetNormalized = normalizeTitle(show.name);
-  
-  const search = await fetchJSON(`https://api.themoviedb.org/3/search/tv?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(show.name)}`);
-  if (!search?.results?.length) return null;
-
-  const matchingResults = search.results.filter(r => normalizeTitle(r.name) === targetNormalized);
-  if (matchingResults.length === 0) return search.results[0].id;
-
-  const tvmazeEpisodes = show._embedded?.episodes || [];
-  let earliestEp = "0000-01-01";
-  let latestEp = "9999-12-31";
-  if (tvmazeEpisodes.length > 0) {
-    const dates = tvmazeEpisodes.map(e => e.airdate || (e.airstamp ? e.airstamp.split('T')[0] : null)).filter(Boolean).sort();
-    if (dates.length > 0) {
-      earliestEp = dates[0];
-      latestEp = dates[dates.length - 1];
-    }
-  }
-
-  const scoredCandidates = [];
-  for (const candidate of matchingResults) {
-    const detailed = await fetchJSON(`https://api.themoviedb.org/3/tv/${candidate.id}?api_key=${TMDB_API_KEY}`);
-    if (!detailed) continue;
-
-    const status = (detailed.status || "").toLowerCase();
-    const tmdbStart = detailed.first_air_date || "0000-01-01";
-    const tmdbEnd = detailed.last_air_date || pacificDateString(new Date());
-
-    let score = 0;
-
-    const tmdbCountries = detailed.origin_country || [];
-    if (tvmazeCountry && tmdbCountries.includes(tvmazeCountry)) {
-      score += 500;
-    }
-
-    if (status.includes("returning") || status.includes("in production")) {
-      score += 100;
-    }
-    if (earliestEp <= tmdbEnd && latestEp >= tmdbStart) {
-      score += 50;
-    }
-    score += (new Date(tmdbEnd).getTime() / 1000000000);
-
-    scoredCandidates.push({ id: candidate.id, score });
-  }
-
-  if (scoredCandidates.length > 0) {
-    scoredCandidates.sort((a, b) => b.score - a.score);
-    return scoredCandidates[0].id;
-  }
-
-  return matchingResults[0].id;
-}
-
-async function getImdbId(showData, tmdbId) {
-  if (showData.externals?.imdb) {
-    return showData.externals.imdb;
-  }
-  if (tmdbId) {
-    const ext = await fetchJSON(`https://api.themoviedb.org/3/tv/${tmdbId}/external_ids?api_key=${TMDB_API_KEY}`);
-    if (ext?.imdb_id) {
-      return ext.imdb_id;
-    }
-  }
-  return null;
-}
-
 async function build() {
-  const activeShowIds = new Set();
-  const targetCountries = ["US", "GB", "CA", "AU", "NZ"];
-  
-  console.log(`Starting structural cross-feed schedule analysis...`);
+  const discoveredShows = new Map(); // tmdbId -> latestAirDate
 
-  for (let i = 0; i < DISCOVERY_DAYS_BACK; i++) {
+  console.log(`Discovering English adult shows from TMDB across the past ${RETENTION_DAYS_BACK} days...`);
+
+  // Query TMDB Discover per day using air_date window
+  for (let i = 0; i < RETENTION_DAYS_BACK; i++) {
     const d = new Date();
     d.setDate(d.getDate() - i);
     const dateStr = pacificDateString(d);
-    
-    for (const country of targetCountries) {
-      const broadcastList = await fetchJSON(`https://api.tvmaze.com/schedule?country=${country}&date=${dateStr}`);
-      if (Array.isArray(broadcastList)) {
-        broadcastList.forEach(ep => {
-          const show = ep.show || (ep._embedded && ep._embedded.show);
-          if (show?.id) activeShowIds.add(show.id);
-        });
-      }
-    }
 
-    const webList = await fetchJSON(`https://api.tvmaze.com/schedule/web?date=${dateStr}`);
-    if (Array.isArray(webList)) {
-      webList.forEach(ep => {
-        const show = ep.show || (ep._embedded && ep._embedded.show);
-        if (!show?.id) return;
+    const discoverUrl = `https://api.themoviedb.org/3/discover/tv?api_key=${TMDB_API_KEY}&air_date.gte=${dateStr}&air_date.lte=${dateStr}&with_original_language=en&sort_by=popularity.desc`;
+    const data = await fetchJSON(discoverUrl);
 
-        const webCountry = show.webChannel?.country?.code;
-        const networkCountry = show.network?.country?.code;
-
-        if (
-          (webCountry && targetCountries.includes(webCountry)) || 
-          (show.webChannel && !webCountry) || 
-          (!networkCountry && !show.webChannel)
-        ) {
-          activeShowIds.add(show.id);
+    if (data?.results) {
+      for (const show of data.results) {
+        if (!discoveredShows.has(show.id)) {
+          discoveredShows.set(show.id, dateStr);
         }
-      });
+      }
     }
   }
 
-  console.log(`Processing metadata mappings for ${activeShowIds.size} shows...`);
+  console.log(`Discovered ${discoveredShows.size} unique shows. Processing TMDB metadata...`);
 
   const metas = [];
-  for (const showId of activeShowIds) {
-    const showData = await fetchJSON(`https://api.tvmaze.com/shows/${showId}?embed=episodes`);
-    
-    if (!showData) {
-      console.warn(`[API ERROR] Empty response for TVMaze ID ${showId}. Likely hit a 429 rate limit or network drop.`);
-      auditLogs.push({ 
-        name: `ID: ${showId}`, 
-        type: "UNKNOWN", 
-        status: "API FETCH FAILED", 
-        detail: "TVMaze request returned null. Check network or connection throttles." 
-      });
-      continue;
-    }
+  for (const [tmdbId, latestAirDate] of discoveredShows.entries()) {
+    const tmdbMeta = await getTmdbMetadata(tmdbId);
+    if (!tmdbMeta) continue;
 
-    const audit = evaluateExclusion(showData);
+    const showName = tmdbMeta.details.name;
+    const audit = evaluateExclusion(showName, tmdbMeta);
+    
     if (audit.exclude) {
-      auditLogs.push({ name: showData.name, type: showData.type, status: "DROPPED BY FILTER", detail: audit.reason });
+      auditLogs.push({ name: showName, status: "DROPPED BY FILTER", detail: audit.reason });
       continue;
     }
     
-    const tmdbId = await findTmdbId(showData);
-    const imdbId = await getImdbId(showData, tmdbId);
-    
-    let stremioId = (tmdbId ? `tmdb:${tmdbId}` : null) || imdbId || `tvmaze:${showData.id}`;
-
-    const mappedVideos = (showData._embedded?.episodes || [])
-      .sort((a, b) => (a.season - b.season) || (a.number - b.number))
-      .map(ep => {
-        const sNum = Number(ep.season || 1);
-        const eNum = Number(ep.number || 0);
-        const epAirDate = ep.airdate || (ep.airstamp ? ep.airstamp.split('T')[0] : null);
-        
-        return {
-          released: epAirDate,
-          season: sNum,
-          episode: eNum
-        };
-      });
+    const imdbId = tmdbMeta.imdbId || null;
+    const stremioId = `tmdb:${tmdbId}`;
+    const tmdbDetails = tmdbMeta.details;
 
     metas.push({
       id: stremioId,
       imdb_id: imdbId || undefined,
-      tmdb_id: tmdbId || undefined,
-      tvmazeId: showData.id,
+      tmdb_id: tmdbId,
       type: "series",
-      name: showData.name,
-      genres: showData.genres || [],
-      year: showData.premiered ? showData.premiered.split("-")[0] : undefined,
-      description: cleanHTML(showData.summary),
-      poster: showData.image?.original || showData.image?.medium || null,
-      background: showData.image?.original || null,
-      videos: mappedVideos 
+      name: showName,
+      genres: tmdbMeta.genres,
+      year: tmdbDetails.first_air_date ? tmdbDetails.first_air_date.split("-")[0] : undefined,
+      description: tmdbDetails.overview || "",
+      poster: tmdbDetails.poster_path ? `https://image.tmdb.org/t/p/original${tmdbDetails.poster_path}` : null,
+      background: tmdbDetails.backdrop_path ? `https://image.tmdb.org/t/p/original${tmdbDetails.backdrop_path}` : null,
+      latestAirDate: latestAirDate
     });
+
+    auditLogs.push({ name: showName, status: "KEPT", detail: `Latest airdate: ${latestAirDate}` });
   }
 
-  const todayStr = pacificDateString(new Date());
-  const cutoffTarget = new Date();
-  cutoffTarget.setDate(cutoffTarget.getDate() - RETENTION_DAYS_BACK);
-  const cutoffStr = pacificDateString(cutoffTarget);
-
-  const filteredMetas = metas.filter(show => {
-    const latest = getLatestValidDate(show, todayStr);
-    const isKeep = latest >= cutoffStr && latest <= todayStr; 
-    
-    if (isKeep) {
-      auditLogs.push({ name: show.name, type: "Series/Reality", status: "KEPT", detail: `Latest airdate: ${latest}` });
-    } else {
-      auditLogs.push({ name: show.name, type: "Series/Reality", status: "DROPPED BY DATE", detail: `Airdate ${latest} falls outside retention window` });
-    }
-    return isKeep;
-  });
-
-  const uniqueMetasMap = new Map();
-  filteredMetas.forEach(show => {
-    if (uniqueMetasMap.has(show.id)) {
-      show.id = `tvmaze-fallback:${show.tvmazeId}`;
-    }
-    uniqueMetasMap.set(show.id, show);
-  });
-
-  const finalMetas = Array.from(uniqueMetasMap.values());
-  
-  // 1. Sort using the active videos data BEFORE stripping it
-  finalMetas.sort((a, b) => getLatestValidDate(b, todayStr).localeCompare(getLatestValidDate(a, todayStr)));
-
-  // 2. Strip the heavy videos array right before writing out the final file
-  finalMetas.forEach(show => {
-    delete show.videos;
-  });
+  // Sort by most recent air date
+  metas.sort((a, b) => b.latestAirDate.localeCompare(a.latestAirDate));
+  metas.forEach(show => { delete show.latestAirDate; });
 
   if (!fs.existsSync(CATALOG_DIR)) fs.mkdirSync(CATALOG_DIR, { recursive: true });
   const filePath = path.join(CATALOG_DIR, "tvmaze_weekly_schedule.json");
-  fs.writeFileSync(filePath, JSON.stringify({ metas: finalMetas }, null, 2));
+  fs.writeFileSync(filePath, JSON.stringify({ metas }, null, 2));
 
   console.log("\n=================================================================================");
-  console.log("                    FINAL PIPELINE PROCESSING SUMMARY REPORT                     ");
+  console.log("            TMDB DAILY ADULT DISCOVERY REPORT SUMMARY                            ");
   console.log("=================================================================================");
   console.table(auditLogs);
   console.log("=================================================================================\n");
+  console.log(`Successfully generated ${metas.length} adult shows in the catalog.`);
 }
 
 build().catch(err => { console.error(err); process.exit(1); });
