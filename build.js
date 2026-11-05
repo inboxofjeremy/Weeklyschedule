@@ -1,7 +1,7 @@
 /**
  * build.js — Stremio & Wako compatible static adult catalog
  * TMDB Daily Discover (9-Day Window, Dynamic Pagination)
- * Strictly preserves all original rules + blocks short vertical dramas & wrestling content.
+ * Includes: Rules, Short Drama Filter, Wrestling Filter, QI Whitelist, & <5% Rating Excludes.
  */
 
 import fs from "fs";
@@ -62,22 +62,37 @@ async function getTmdbMetadata(tmdbId, country = "US") {
     genres: details.genres ? details.genres.map(g => g.name) : [],
     keywords: kwList.map(k => k.name),
     originalLanguage: details.original_language,
-    networks: (details.networks || []).map(n => n.name)
+    networks: (details.networks || []).map(n => n.name),
+    voteAverage: details.vote_average ?? null,
+    voteCount: details.vote_count ?? 0
   };
 }
 
 // ---------------------------------------------------------------------------------
 // EXCLUSION & FILTER LOGIC
 // ---------------------------------------------------------------------------------
-function evaluateExclusion(showName, tmdbMeta) {
+function evaluateExclusion(tmdbId, showName, tmdbMeta) {
   const name = (showName || "").toLowerCase();
+  
+  // 1. Hardcoded ID / Title Whitelist Overrides (Always allow QI & QI XL)
+  const whitelistedIds = [1554, 312415];
+  if (whitelistedIds.includes(Number(tmdbId)) || name === "qi" || name === "qi xl" || name.includes("blankety blank")) {
+    return { exclude: false, reason: "Whitelisted Override" };
+  }
+
+  // 2. User Rating Check: Exclude ratings below 5% (vote_average < 0.5 / 10)
+  if (tmdbMeta.voteCount > 0 && tmdbMeta.voteAverage !== null && tmdbMeta.voteAverage < 0.5) {
+    const pct = (tmdbMeta.voteAverage * 10).toFixed(1);
+    return { exclude: true, reason: `Excluded: Rating below 5% (${pct}%)` };
+  }
+
   const genres = (tmdbMeta.genres || []).map(g => g.toLowerCase());
   const lang = (tmdbMeta.originalLanguage || "").toLowerCase();
   const networks = (tmdbMeta.networks || []).map(n => n.toLowerCase());
   const keywords = (tmdbMeta.keywords || []).map(k => k.toLowerCase());
   const lowerOverview = (tmdbMeta.details.overview || "").toLowerCase();
 
-  // 1. Language & Foreign Script Checks
+  // 3. Language & Foreign Script Checks
   if (lang !== "en") {
     return { exclude: true, reason: `Excluded: Non-English language ('${lang}')` };
   }
@@ -87,12 +102,7 @@ function evaluateExclusion(showName, tmdbMeta) {
     return { exclude: true, reason: `Excluded: Contains foreign script (${showName})` };
   }
 
-  // 2. Whitelist Overrides
-  if (name.includes("blankety blank")) {
-    return { exclude: false, reason: "Whitelisted" };
-  }
-
-  // 3. Blocked Networks
+  // 4. Blocked Networks
   const blockedNetworks = [
     "iqiyi", "bilibili", "wavve", "youku", "tencent qq", "vivaone", 
     "premier", "смотрим", "кион", "geo entertainment", "tokyo mx"
@@ -101,7 +111,7 @@ function evaluateExclusion(showName, tmdbMeta) {
     return { exclude: true, reason: `Excluded: Blocked Network (${networks.join(', ')})` };
   }
 
-  // 4. Professional Wrestling Exclusion
+  // 5. Professional Wrestling Exclusion
   const wrestlingTerms = [
     "wwe", "aew", "njpw", "impact wrestling", "ring of honor", "smackdown", 
     "wrestlemania", "royal rumble", "professional wrestling", "pro wrestling"
@@ -114,7 +124,7 @@ function evaluateExclusion(showName, tmdbMeta) {
     return { exclude: true, reason: `Excluded: Professional Wrestling (${showName})` };
   }
 
-  // 5. Exclude Vertical Short Dramas / Micro-Series patterns
+  // 6. Exclude Vertical Short Dramas / Micro-Series patterns
   if (
     name.includes("san pito pato") ||
     name.includes("dragon baby") ||
@@ -124,7 +134,7 @@ function evaluateExclusion(showName, tmdbMeta) {
     return { exclude: true, reason: `Excluded: Vertical short-drama / micro-series pattern` };
   }
 
-  // 6. Allowed Reality / Renovation / Game Shows
+  // 7. Allowed Reality / Renovation / Game Shows
   const allowedGenres = ["panel", "quiz", "game show", "game-show", "reality", "home improvement", "renovation"];
   if (
     genres.some(g => allowedGenres.some(a => g.includes(a))) || 
@@ -134,7 +144,7 @@ function evaluateExclusion(showName, tmdbMeta) {
     return { exclude: false, reason: "Allowed Reality/Renovation Content" };
   }
 
-  // 7. Excluded Categories (Sports, News, Talk, Pure Documentary)
+  // 8. Excluded Categories (Sports, News, Talk, Pure Documentary)
   if (genres.some(g => g.includes("sports"))) {
     return { exclude: true, reason: "Excluded: Sports" };
   }
@@ -167,7 +177,6 @@ async function build() {
       const data = await fetchJSON(discoverUrl);
 
       if (data?.results) {
-        // Read actual total pages available for this specific date
         totalPages = Math.min(data.total_pages || 1, MAX_PAGES_CAP);
 
         for (const show of data.results) {
@@ -188,7 +197,7 @@ async function build() {
     if (!tmdbMeta) continue;
 
     const showName = tmdbMeta.details.name;
-    const audit = evaluateExclusion(showName, tmdbMeta);
+    const audit = evaluateExclusion(tmdbId, showName, tmdbMeta);
     
     if (audit.exclude) {
       auditLogs.push({ name: showName, status: "DROPPED BY FILTER", detail: audit.reason });
@@ -213,7 +222,7 @@ async function build() {
       latestAirDate: latestAirDate
     });
 
-    auditLogs.push({ name: showName, status: "KEPT", detail: `Latest airdate: ${latestAirDate}` });
+    auditLogs.push({ name: showName, status: "KEPT", detail: audit.reason });
   }
 
   // Sort by most recent air date
