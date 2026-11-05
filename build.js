@@ -1,7 +1,7 @@
 /**
  * build.js — Stremio & Wako compatible static adult catalog
- * TMDB Daily Discover (9-Day Window, Dynamic Pagination)
- * Includes: Rules, Short Drama Filter, Wrestling Filter, QI Whitelist, & <5% Rating Excludes.
+ * TMDB Daily Discover (9-Day Window, Fully Automated Dynamic Pagination)
+ * Includes: Rules, Short Drama Filter, Wrestling Filter, QI Whitelist, & Unrated/<5% Excludes.
  */
 
 import fs from "fs";
@@ -18,7 +18,6 @@ if (!TMDB_API_KEY || TMDB_API_KEY.trim() === "") {
 
 const CATALOG_DIR = path.join(__dirname, "catalog", "series");
 const RETENTION_DAYS_BACK = 9; // 9-day rolling window
-const MAX_PAGES_CAP = 10; // Dynamic cap (up to 200 shows max per day)
 
 const auditLogs = [];
 
@@ -80,10 +79,9 @@ function evaluateExclusion(tmdbId, showName, tmdbMeta) {
     return { exclude: false, reason: "Whitelisted Override" };
   }
 
-  // 2. User Rating Check: Exclude ratings below 5% (vote_average < 0.5 / 10)
-  if (tmdbMeta.voteCount > 0 && tmdbMeta.voteAverage !== null && tmdbMeta.voteAverage < 0.5) {
-    const pct = (tmdbMeta.voteAverage * 10).toFixed(1);
-    return { exclude: true, reason: `Excluded: Rating below 5% (${pct}%)` };
+  // 2. User Rating Check: Exclude unrated (0 votes) or ratings below 5%
+  if (tmdbMeta.voteCount === 0 || (tmdbMeta.voteAverage !== null && tmdbMeta.voteAverage < 0.5)) {
+    return { exclude: true, reason: `Excluded: Unrated or rating below 5% (Votes: ${tmdbMeta.voteCount})` };
   }
 
   const genres = (tmdbMeta.genres || []).map(g => g.toLowerCase());
@@ -161,9 +159,9 @@ function evaluateExclusion(tmdbId, showName, tmdbMeta) {
 async function build() {
   const discoveredShows = new Map(); // tmdbId -> latestAirDate
 
-  console.log(`Discovering English adult shows from TMDB across the past ${RETENTION_DAYS_BACK} days (Dynamic Pagination up to ${MAX_PAGES_CAP} pages per day)...`);
+  console.log(`Discovering English adult shows from TMDB across the past ${RETENTION_DAYS_BACK} days (Fully Automated Dynamic Pagination)...`);
 
-  // Dynamic discovery loop
+  // Fully automated pagination loop based strictly on TMDB's total_pages response
   for (let i = 0; i < RETENTION_DAYS_BACK; i++) {
     const d = new Date();
     d.setDate(d.getDate() - i);
@@ -177,7 +175,7 @@ async function build() {
       const data = await fetchJSON(discoverUrl);
 
       if (data?.results) {
-        totalPages = Math.min(data.total_pages || 1, MAX_PAGES_CAP);
+        totalPages = data.total_pages || 1;
 
         for (const show of data.results) {
           if (!discoveredShows.has(show.id)) {
