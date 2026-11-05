@@ -1,7 +1,7 @@
 /**
  * build.js — Stremio & Wako compatible static adult catalog
  * TMDB Daily Discover (9-Day Window, Multi-Page Discovery)
- * Strictly preserves all original exclusion/inclusion rules.
+ * Strictly preserves all original exclusion/inclusion rules & blocks short vertical dramas.
  */
 
 import fs from "fs";
@@ -18,7 +18,7 @@ if (!TMDB_API_KEY || TMDB_API_KEY.trim() === "") {
 
 const CATALOG_DIR = path.join(__dirname, "catalog", "series");
 const RETENTION_DAYS_BACK = 9; // 9-day rolling window
-const PAGES_PER_DAY = 5; // Fetch up to 5 pages (100 shows) per day to ensure no missing shows
+const PAGES_PER_DAY = 5; // Fetch up to 5 pages (100 shows) per day
 
 const auditLogs = [];
 
@@ -64,7 +64,7 @@ async function getTmdbMetadata(tmdbId, country = "US") {
 }
 
 // ---------------------------------------------------------------------------------
-// UNTOUCHED ORIGINAL EXCLUSION & FILTER LOGIC
+// EXCLUSION & FILTER LOGIC
 // ---------------------------------------------------------------------------------
 function evaluateExclusion(showName, tmdbMeta) {
   const name = (showName || "").toLowerCase();
@@ -96,7 +96,18 @@ function evaluateExclusion(showName, tmdbMeta) {
     return { exclude: true, reason: `Excluded: Blocked Network (${networks.join(', ')})` };
   }
 
-  // 4. Allowed Reality / Renovation / Game Shows
+  // 4. Exclude Vertical Short Dramas / Micro-Series patterns
+  const lowerOverview = (tmdbMeta.details.overview || "").toLowerCase();
+  if (
+    name.includes("san pito pato") ||
+    name.includes("dragon baby") ||
+    lowerOverview.includes("vertical drama") ||
+    lowerOverview.includes("short drama")
+  ) {
+    return { exclude: true, reason: `Excluded: Vertical short-drama / micro-series pattern` };
+  }
+
+  // 5. Allowed Reality / Renovation / Game Shows
   const allowedGenres = ["panel", "quiz", "game show", "game-show", "reality", "home improvement", "renovation"];
   if (
     genres.some(g => allowedGenres.some(a => g.includes(a))) || 
@@ -106,7 +117,7 @@ function evaluateExclusion(showName, tmdbMeta) {
     return { exclude: false, reason: "Allowed Reality/Renovation Content" };
   }
 
-  // 5. Excluded Categories (Sports, News, Talk, Pure Documentary)
+  // 6. Excluded Categories (Sports, News, Talk, Pure Documentary)
   if (genres.some(g => g.includes("sports"))) {
     return { exclude: true, reason: "Excluded: Sports" };
   }
@@ -125,7 +136,7 @@ async function build() {
 
   console.log(`Discovering English adult shows from TMDB across the past ${RETENTION_DAYS_BACK} days (${PAGES_PER_DAY} pages per day)...`);
 
-  // Query TMDB Discover per day across multiple pages to eliminate 20-result cap
+  // Query TMDB Discover per day across multiple pages
   for (let i = 0; i < RETENTION_DAYS_BACK; i++) {
     const d = new Date();
     d.setDate(d.getDate() - i);
