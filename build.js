@@ -1,7 +1,7 @@
 /**
  * build.js — Stremio & Wako compatible static adult catalog
  * TMDB Daily Discover (9-Day Window, Multi-Page Discovery)
- * Strictly preserves all original exclusion/inclusion rules & blocks short vertical dramas.
+ * Strictly preserves all original rules + blocks short vertical dramas & wrestling content.
  */
 
 import fs from "fs";
@@ -43,21 +43,24 @@ function pacificDateString(date = new Date()) {
 async function getTmdbMetadata(tmdbId, country = "US") {
   if (!tmdbId) return null;
   
-  const [details, ratingsData, externalIds] = await Promise.all([
+  const [details, ratingsData, externalIds, keywordsData] = await Promise.all([
     fetchJSON(`https://api.themoviedb.org/3/tv/${tmdbId}?api_key=${TMDB_API_KEY}`),
     fetchJSON(`https://api.themoviedb.org/3/tv/${tmdbId}/content_ratings?api_key=${TMDB_API_KEY}`),
-    fetchJSON(`https://api.themoviedb.org/3/tv/${tmdbId}/external_ids?api_key=${TMDB_API_KEY}`)
+    fetchJSON(`https://api.themoviedb.org/3/tv/${tmdbId}/external_ids?api_key=${TMDB_API_KEY}`),
+    fetchJSON(`https://api.themoviedb.org/3/tv/${tmdbId}/keywords?api_key=${TMDB_API_KEY}`)
   ]);
 
   if (!details) return null;
 
   const ratingObj = ratingsData?.results?.find(r => r.iso_3166_1 === country) || ratingsData?.results?.[0];
+  const kwList = keywordsData?.results || keywordsData?.keywords || [];
   
   return {
     details,
     certification: ratingObj ? ratingObj.rating : null,
     imdbId: externalIds?.imdb_id || null,
     genres: details.genres ? details.genres.map(g => g.name) : [],
+    keywords: kwList.map(k => k.name),
     originalLanguage: details.original_language,
     networks: (details.networks || []).map(n => n.name)
   };
@@ -71,6 +74,8 @@ function evaluateExclusion(showName, tmdbMeta) {
   const genres = (tmdbMeta.genres || []).map(g => g.toLowerCase());
   const lang = (tmdbMeta.originalLanguage || "").toLowerCase();
   const networks = (tmdbMeta.networks || []).map(n => n.toLowerCase());
+  const keywords = (tmdbMeta.keywords || []).map(k => k.toLowerCase());
+  const lowerOverview = (tmdbMeta.details.overview || "").toLowerCase();
 
   // 1. Language & Foreign Script Checks
   if (lang !== "en") {
@@ -96,8 +101,20 @@ function evaluateExclusion(showName, tmdbMeta) {
     return { exclude: true, reason: `Excluded: Blocked Network (${networks.join(', ')})` };
   }
 
-  // 4. Exclude Vertical Short Dramas / Micro-Series patterns
-  const lowerOverview = (tmdbMeta.details.overview || "").toLowerCase();
+  // 4. Professional Wrestling Exclusion
+  const wrestlingTerms = [
+    "wwe", "aew", "njpw", "impact wrestling", "ring of honor", "smackdown", 
+    "wrestlemania", "royal rumble", "professional wrestling", "pro wrestling"
+  ];
+  if (
+    wrestlingTerms.some(term => name.includes(term)) ||
+    keywords.some(k => k.includes("wrestling")) ||
+    (lowerOverview.includes("wrestling") && (lowerOverview.includes("ring") || lowerOverview.includes("championship")))
+  ) {
+    return { exclude: true, reason: `Excluded: Professional Wrestling (${showName})` };
+  }
+
+  // 5. Exclude Vertical Short Dramas / Micro-Series patterns
   if (
     name.includes("san pito pato") ||
     name.includes("dragon baby") ||
@@ -107,7 +124,7 @@ function evaluateExclusion(showName, tmdbMeta) {
     return { exclude: true, reason: `Excluded: Vertical short-drama / micro-series pattern` };
   }
 
-  // 5. Allowed Reality / Renovation / Game Shows
+  // 6. Allowed Reality / Renovation / Game Shows
   const allowedGenres = ["panel", "quiz", "game show", "game-show", "reality", "home improvement", "renovation"];
   if (
     genres.some(g => allowedGenres.some(a => g.includes(a))) || 
@@ -117,7 +134,7 @@ function evaluateExclusion(showName, tmdbMeta) {
     return { exclude: false, reason: "Allowed Reality/Renovation Content" };
   }
 
-  // 6. Excluded Categories (Sports, News, Talk, Pure Documentary)
+  // 7. Excluded Categories (Sports, News, Talk, Pure Documentary)
   if (genres.some(g => g.includes("sports"))) {
     return { exclude: true, reason: "Excluded: Sports" };
   }
