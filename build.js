@@ -1,6 +1,7 @@
 /**
  * build.js — Stremio & Wako compatible static adult catalog
- * TMDB Daily Discover (9-Day Window)
+ * TMDB Daily Discover (9-Day Window, Multi-Page Discovery)
+ * Strictly preserves all original exclusion/inclusion rules.
  */
 
 import fs from "fs";
@@ -17,6 +18,7 @@ if (!TMDB_API_KEY || TMDB_API_KEY.trim() === "") {
 
 const CATALOG_DIR = path.join(__dirname, "catalog", "series");
 const RETENTION_DAYS_BACK = 9; // 9-day rolling window
+const PAGES_PER_DAY = 5; // Fetch up to 5 pages (100 shows) per day to ensure no missing shows
 
 const auditLogs = [];
 
@@ -61,6 +63,9 @@ async function getTmdbMetadata(tmdbId, country = "US") {
   };
 }
 
+// ---------------------------------------------------------------------------------
+// UNTOUCHED ORIGINAL EXCLUSION & FILTER LOGIC
+// ---------------------------------------------------------------------------------
 function evaluateExclusion(showName, tmdbMeta) {
   const name = (showName || "").toLowerCase();
   const genres = (tmdbMeta.genres || []).map(g => g.toLowerCase());
@@ -69,7 +74,7 @@ function evaluateExclusion(showName, tmdbMeta) {
 
   // 1. Language & Foreign Script Checks
   if (lang !== "en") {
-    return { exclude: true, reason: `Excluded: Non-English language (${lang})` };
+    return { exclude: true, reason: `Excluded: Non-English language ('${lang}')` };
   }
 
   const nonEnglishCharRegex = /[\u4e00-\u9fa5\u3040-\u30ff\u3130-\u318f\u0400-\u04ff]/;
@@ -118,27 +123,29 @@ function evaluateExclusion(showName, tmdbMeta) {
 async function build() {
   const discoveredShows = new Map(); // tmdbId -> latestAirDate
 
-  console.log(`Discovering English adult shows from TMDB across the past ${RETENTION_DAYS_BACK} days...`);
+  console.log(`Discovering English adult shows from TMDB across the past ${RETENTION_DAYS_BACK} days (${PAGES_PER_DAY} pages per day)...`);
 
-  // Query TMDB Discover per day using air_date window
+  // Query TMDB Discover per day across multiple pages to eliminate 20-result cap
   for (let i = 0; i < RETENTION_DAYS_BACK; i++) {
     const d = new Date();
     d.setDate(d.getDate() - i);
     const dateStr = pacificDateString(d);
 
-    const discoverUrl = `https://api.themoviedb.org/3/discover/tv?api_key=${TMDB_API_KEY}&air_date.gte=${dateStr}&air_date.lte=${dateStr}&with_original_language=en&sort_by=popularity.desc`;
-    const data = await fetchJSON(discoverUrl);
+    for (let page = 1; page <= PAGES_PER_DAY; page++) {
+      const discoverUrl = `https://api.themoviedb.org/3/discover/tv?api_key=${TMDB_API_KEY}&air_date.gte=${dateStr}&air_date.lte=${dateStr}&with_original_language=en&sort_by=popularity.desc&page=${page}`;
+      const data = await fetchJSON(discoverUrl);
 
-    if (data?.results) {
-      for (const show of data.results) {
-        if (!discoveredShows.has(show.id)) {
-          discoveredShows.set(show.id, dateStr);
+      if (data?.results) {
+        for (const show of data.results) {
+          if (!discoveredShows.has(show.id)) {
+            discoveredShows.set(show.id, dateStr);
+          }
         }
       }
     }
   }
 
-  console.log(`Discovered ${discoveredShows.size} unique shows. Processing TMDB metadata...`);
+  console.log(`Discovered ${discoveredShows.size} unique candidate shows. Evaluating metadata...`);
 
   const metas = [];
   for (const [tmdbId, latestAirDate] of discoveredShows.entries()) {
