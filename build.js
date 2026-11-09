@@ -1,7 +1,7 @@
 /**
  * build.js — Stremio & Wako compatible static adult catalog
  * TMDB Daily Discover (9-Day Window, Fully Automated Dynamic Pagination)
- * Includes: Rules, Short Drama Filter, Wrestling Filter, QI Whitelist, & Unrated/<5% Excludes.
+ * Includes: Rules, Short Drama Filter, Wrestling Filter, Whitelist Overrides, & Unrated/<5% Excludes.
  */
 
 import fs from "fs";
@@ -73,9 +73,22 @@ async function getTmdbMetadata(tmdbId, country = "US") {
 function evaluateExclusion(tmdbId, showName, tmdbMeta) {
   const name = (showName || "").toLowerCase();
   
-  // 1. Hardcoded ID / Title Whitelist Overrides (Always allow QI & QI XL)
-  const whitelistedIds = [1554, 312415];
-  if (whitelistedIds.includes(Number(tmdbId)) || name === "qi" || name === "qi xl" || name.includes("blankety blank")) {
+  // 1. Hardcoded Whitelist Overrides (IDs and Titles)
+  const whitelistedIds = [1554, 312415]; // QI, QI XL
+  const whitelistedTitles = [
+    "qi", 
+    "qi xl", 
+    "blankety blank", 
+    "house shock", 
+    "home town takeover canada", 
+    "saturday night live", 
+    "the adam ray show"
+  ];
+
+  if (
+    whitelistedIds.includes(Number(tmdbId)) || 
+    whitelistedTitles.some(title => name === title || name.includes(title))
+  ) {
     return { exclude: false, reason: "Whitelisted Override" };
   }
 
@@ -126,8 +139,10 @@ function evaluateExclusion(tmdbId, showName, tmdbMeta) {
   if (
     name.includes("san pito pato") ||
     name.includes("dragon baby") ||
+    name.includes("mayday for my devil") ||
     lowerOverview.includes("vertical drama") ||
-    lowerOverview.includes("short drama")
+    lowerOverview.includes("short drama") ||
+    (name.includes("devil") && lowerOverview.includes("billionaire"))
   ) {
     return { exclude: true, reason: `Excluded: Vertical short-drama / micro-series pattern` };
   }
