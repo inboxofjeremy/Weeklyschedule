@@ -82,7 +82,8 @@ function evaluateExclusion(tmdbId, showName, tmdbMeta) {
     "house shock", 
     "home town takeover canada", 
     "saturday night live", 
-    "the adam ray show"
+    "the adam ray show",
+    "awkwafina: the unlikely cook"
   ];
 
   if (
