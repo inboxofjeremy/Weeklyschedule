@@ -1,8 +1,8 @@
 /**
  * build.js — Stremio & Wako compatible static adult catalog
  * TMDB Daily Discover (3-Day Lookahead + 9-Day Rolling Window) + Live Stream Addon Verification
- * Probes next_episode_to_air (in lookahead) or last_episode + 1 (when nextEp is missing or beyond lookahead),
- * promotes confirmed live streams to the top, and keeps unverified future dates below today.
+ * Uniform 2500ms stream probe with next-episode fallback and diagnostic logging for all kept shows;
+ * unverified future dates without streams are demoted behind today and confirmed drops.
  */
 
 import fs from "fs";
@@ -11,11 +11,20 @@ import { fileURLToPath } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TMDB_API_KEY = process.env.TMDB_API_KEY;
-// Base URL of your Stremio stream addon WITHOUT trailing slash or /manifest.json
-// Example: https://aiostreams.example.com/your-config-id
-const STREAM_ADDON_URL = (process.env.STREAM_ADDON_URL || "")
-  .replace(/\/manifest\.json\/?$/, "")
-  .replace(/\/$/, "");
+
+function normalizeStreamAddonBaseUrl(rawUrl) {
+  if (!rawUrl || typeof rawUrl !== "string") return "";
+  return rawUrl
+    .trim()
+    .split("?")[0]
+    .split("#")[0]
+    .replace(/\/manifest\.json\/?$/i, "")
+    .replace(/\/+$/, "");
+}
+
+// Base URL of your Stremio stream addon WITHOUT query string, trailing slash, or /manifest.json
+// Example: https://aiostreams.example.com/stremio/your-config-id
+const STREAM_ADDON_URL = normalizeStreamAddonBaseUrl(process.env.STREAM_ADDON_URL || "");
 
 if (!TMDB_API_KEY || TMDB_API_KEY.trim() === "") {
   console.error("\n❌ ERROR: TMDB_API_KEY environment variable is not defined or is empty!\n");
@@ -71,28 +80,70 @@ function pacificDateString(date = new Date()) {
 }
 
 /**
- * Checks the configured Stremio stream addon to see if the target episode
- * has already dropped and is playable right now.
+ * Checks the configured Stremio stream addon using a uniform 2500ms timeout
+ * to see if the target episode has already dropped and is playable right now.
+ * Logs diagnostic details uniformly for any probed show.
  */
-async function hasLiveStreams(imdbId, season, episode) {
-  if (!STREAM_ADDON_URL || !imdbId || season == null || episode == null) return false;
-
-  const streamUrl = `${STREAM_ADDON_URL}/stream/series/${imdbId}:${season}:${episode}.json`;
-  const data = await fetchJSON(streamUrl, 4500);
-
-  if (!data || !Array.isArray(data.streams) || data.streams.length === 0) {
+async function hasLiveStreams(imdbId, season, episode, debugLabel = "") {
+  if (!STREAM_ADDON_URL || !imdbId || season == null || episode == null) {
+    if (debugLabel) {
+      console.log(`[STREAM DEBUG ${debugLabel}] Skipped probe (url=${Boolean(STREAM_ADDON_URL)}, imdbId=${imdbId}, s=${season}, e=${episode})`);
+    }
     return false;
   }
 
-  const playableStreams = data.streams.filter(s => {
-    const label = `${s.name || ""} ${s.title || ""} ${s.description || ""}`;
-    if (/no streams|not found|error|rate limit|addon error/i.test(label)) {
+  const streamUrl = `${STREAM_ADDON_URL}/stream/series/${imdbId}:${season}:${episode}.json`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 2500);
+
+  try {
+    const res = await fetch(streamUrl, {
+      signal: controller.signal,
+      headers: {
+        "User-Agent": "Mozilla/5.0 Stremio",
+        "Accept": "application/json"
+      }
+    });
+
+    if (!res.ok) {
+      if (debugLabel) {
+        console.log(`[STREAM DEBUG ${debugLabel}] HTTP ${res.status} for ${imdbId}:${season}:${episode} (${streamUrl})`);
+      }
       return false;
     }
-    return Boolean(s.url || s.infoHash || s.externalUrl || s.ytId || s.streamData);
-  });
 
-  return playableStreams.length > 0;
+    const data = await res.json();
+    const rawCount = Array.isArray(data?.streams) ? data.streams.length : -1;
+
+    if (!Array.isArray(data?.streams) || data.streams.length === 0) {
+      if (debugLabel) {
+        console.log(`[STREAM DEBUG ${debugLabel}] Empty streams array (${rawCount}) for ${imdbId}:${season}:${episode}`);
+      }
+      return false;
+    }
+
+    const playableStreams = data.streams.filter(s => {
+      if (!s || typeof s !== "object") return false;
+      const label = `${s.name || ""} ${s.title || ""} ${s.description || ""}`;
+      if (/no streams|not found|error|rate limit|addon error/i.test(label)) {
+        return false;
+      }
+      return Boolean(s.url || s.infoHash || s.externalUrl || s.ytId || s.streamData);
+    });
+
+    if (debugLabel) {
+      console.log(`[STREAM DEBUG ${debugLabel}] ${imdbId}:${season}:${episode} -> raw=${rawCount}, playable=${playableStreams.length}`);
+    }
+
+    return playableStreams.length > 0;
+  } catch (err) {
+    if (debugLabel) {
+      console.log(`[STREAM DEBUG ${debugLabel}] Probe failed for ${imdbId}:${season}:${episode}: ${err?.name || "Error"} - ${err?.message || err}`);
+    }
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function getTmdbMetadata(tmdbId, country = "US") {
@@ -248,6 +299,8 @@ async function build() {
   console.log(`Discovering English adult shows from TMDB (${LOOKAHEAD_DAYS}-day lookahead + ${RETENTION_DAYS_BACK}-day window)...`);
   if (!STREAM_ADDON_URL) {
     console.warn("⚠️ STREAM_ADDON_URL not set — skipping live stream availability checks.");
+  } else {
+    console.log(`Using normalized STREAM_ADDON_URL: ${STREAM_ADDON_URL}`);
   }
 
   const now = new Date();
@@ -318,15 +371,11 @@ async function build() {
     const lastEpDate = lastEp?.air_date || "";
     const nextEpDate = nextEp?.air_date || "";
 
-    // Base sort date starts at discoveredDate, never allowing an unconfirmed future date to outrank today
     let sortDate = discoveredDate > todayStr ? todayStr : discoveredDate;
     if (lastEpDate && lastEpDate > sortDate && lastEpDate <= todayStr) {
       sortDate = lastEpDate;
     }
 
-    // Build list of candidate (season, episode) targets to probe uniformly for every kept show:
-    // - next_episode_to_air when scheduled within [todayStr, maxFutureStr]
-    // - last_episode + 1 when nextEp is missing or scheduled after maxFutureStr and the show is in the rolling window
     const probeTargets = [];
     if (STREAM_ADDON_URL && imdbId) {
       if (nextEp && nextEpDate >= todayStr && nextEpDate <= maxFutureStr) {
@@ -341,10 +390,13 @@ async function build() {
       }
     }
 
+    const debugLabel = `${showName} (#${tmdbId})`;
+
     return {
       tmdbId,
       showName,
       audit,
+      debugLabel,
       imdbId,
       stremioId,
       tmdbDetails,
@@ -360,11 +412,11 @@ async function build() {
   const activeCandidates = evaluated.filter(Boolean);
   const streamCheckTargets = activeCandidates.filter(item => item.probeTargets.length > 0);
 
-  console.log(`Checking live streams for ${streamCheckTargets.length} shows (concurrency=6, timeout=4500ms)...`);
+  console.log(`Checking live streams for ${streamCheckTargets.length} shows (concurrency=6, timeout=2500ms)...`);
 
   await mapWithConcurrency(streamCheckTargets, 6, async (item) => {
     for (const target of item.probeTargets) {
-      const liveNow = await hasLiveStreams(item.imdbId, target.season, target.episode);
+      const liveNow = await hasLiveStreams(item.imdbId, target.season, target.episode, item.debugLabel);
       if (liveNow) {
         item.sortDate = todayStr;
         item.streamVerified = true;
