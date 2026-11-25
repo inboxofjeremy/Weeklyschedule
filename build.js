@@ -1,7 +1,8 @@
 /**
  * build.js — Stremio & Wako compatible static adult catalog
  * TMDB Daily Discover (3-Day Lookahead + 9-Day Rolling Window) + Rate-Limit-Safe Live Stream Verification
- * Clamps sortDate to today only for shows with confirmed live streams whose listed date differs from today.
+ * Extracts stream availability dates from stream payloads when present, falling back to persisted
+ * stream availability state or todayStr, and clamps sortDate only when verified and different from listedDate.
  */
 
 import fs from "fs";
@@ -31,12 +32,14 @@ if (!TMDB_API_KEY || TMDB_API_KEY.trim() === "") {
 }
 
 const CATALOG_DIR = path.join(__dirname, "catalog", "series");
+const STREAM_STATE_FILE = path.join(__dirname, "catalog", "stream-availability.json");
 const LOOKAHEAD_DAYS = 3; // Catch streaming episodes dropping up to 3 days before TMDB's official date
 const RETENTION_DAYS_BACK = 9; // 9-day rolling window
 const RECENT_FALLBACK_DAYS = 3; // Probe lastEp and lastEp + 1 for recent/today episodes or whitelisted shows
-const STREAM_CONCURRENCY = 2; // Keep low to avoid HTTP 429 rate limits on AIOStreams
-const STREAM_PACING_MS = 300; // Brief pause between stream probes
-const STREAM_PROBE_TIMEOUT_MS = 7500; // Allow slower scraper/cache responses to finish
+const STREAM_CONCURRENCY = Number(process.env.STREAM_CONCURRENCY) || 2; // Keep low to avoid HTTP 429 rate limits on AIOStreams
+const STREAM_PACING_MS = Number(process.env.STREAM_PACING_MS) || 500; // Pause between stream probes to reduce addon load
+const STREAM_PROBE_TIMEOUT_MS = Number(process.env.STREAM_PROBE_TIMEOUT_MS) || 12000; // Allow slower scraper/cache responses to finish
+const ABORT_RETRY_DELAY_MS = 1200; // Pause before retrying after an AbortError
 
 const auditLogs = [];
 
@@ -86,24 +89,84 @@ function pacificDateString(date = new Date()) {
   return `${map.year}-${map.month}-${map.day}`;
 }
 
+function loadStreamAvailability() {
+  try {
+    if (fs.existsSync(STREAM_STATE_FILE)) {
+      const parsed = JSON.parse(fs.readFileSync(STREAM_STATE_FILE, "utf8"));
+      return parsed && typeof parsed === "object" ? parsed : {};
+    }
+  } catch {
+    // Ignore malformed state file and start with an empty map
+  }
+  return {};
+}
+
+function saveStreamAvailability(stateMap) {
+  const dir = path.dirname(STREAM_STATE_FILE);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(STREAM_STATE_FILE, JSON.stringify(stateMap, null, 2));
+}
+
+function extractStreamDate(streams, now = new Date()) {
+  const todayStr = pacificDateString(now);
+  const yesterday = new Date(now);
+  yesterday.setDate(yesterday.getDate() - 1);
+  const yesterdayStr = pacificDateString(yesterday);
+
+  let earliestFound = null;
+
+  for (const s of streams || []) {
+    if (!s || typeof s !== "object") continue;
+
+    const rawProp = s.publishedAt || s.releaseDate || s.createdAt || s.timestamp || s.date;
+    if (rawProp) {
+      const parsed = new Date(rawProp);
+      if (!Number.isNaN(parsed.getTime())) {
+        const pacDate = pacificDateString(parsed);
+        if (pacDate <= todayStr && (!earliestFound || pacDate < earliestFound)) {
+          earliestFound = pacDate;
+        }
+      }
+    }
+
+    const text = `${s.name || ""} ${s.title || ""} ${s.description || ""}`;
+    const isoMatches = text.match(/\b(202\d-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01]))\b/g) || [];
+    for (const d of isoMatches) {
+      if (d <= todayStr && (!earliestFound || d < earliestFound)) {
+        earliestFound = d;
+      }
+    }
+
+    if (/\b(?:1d|yesterday)\b/i.test(text) && !isoMatches.length) {
+      if (!earliestFound || yesterdayStr < earliestFound) {
+        earliestFound = yesterdayStr;
+      }
+    }
+  }
+
+  return earliestFound;
+}
+
 /**
- * Checks the configured Stremio stream addon using a 7500ms timeout
+ * Checks the configured Stremio stream addon using STREAM_PROBE_TIMEOUT_MS
  * to see if the target episode has already dropped and is playable right now,
- * backing off on HTTP 429 and retrying once on AbortError.
+ * backing off on HTTP 429 and retrying once after a pause on AbortError.
+ * Returns { playable: boolean, streamDate: string | null }.
  */
-async function hasLiveStreams(imdbId, season, episode, debugLabel = "") {
+async function checkLiveStreams(imdbId, season, episode, debugLabel = "") {
   if (!STREAM_ADDON_URL || !imdbId || season == null || episode == null) {
     if (debugLabel) {
       console.log(`[STREAM DEBUG ${debugLabel}] Skipped probe (url=${Boolean(STREAM_ADDON_URL)}, imdbId=${imdbId}, s=${season}, e=${episode})`);
     }
-    return false;
+    return { playable: false, streamDate: null };
   }
 
   const streamUrl = `${STREAM_ADDON_URL}/stream/series/${imdbId}:${season}:${episode}.json`;
 
   for (let attempt = 0; attempt < 2; attempt++) {
+    const timeoutForAttempt = attempt === 0 ? STREAM_PROBE_TIMEOUT_MS : STREAM_PROBE_TIMEOUT_MS + 3000;
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), STREAM_PROBE_TIMEOUT_MS);
+    const timer = setTimeout(() => controller.abort(), timeoutForAttempt);
 
     try {
       const res = await fetch(streamUrl, {
@@ -126,14 +189,14 @@ async function hasLiveStreams(imdbId, season, episode, debugLabel = "") {
           await sleep(waitMs);
           continue;
         }
-        return false;
+        return { playable: false, streamDate: null };
       }
 
       if (!res.ok) {
         if (debugLabel) {
           console.log(`[STREAM DEBUG ${debugLabel}] HTTP ${res.status} for ${imdbId}:${season}:${episode}`);
         }
-        return false;
+        return { playable: false, streamDate: null };
       }
 
       const data = await res.json();
@@ -143,7 +206,7 @@ async function hasLiveStreams(imdbId, season, episode, debugLabel = "") {
         if (debugLabel) {
           console.log(`[STREAM DEBUG ${debugLabel}] Empty streams array (${rawCount}) for ${imdbId}:${season}:${episode}`);
         }
-        return false;
+        return { playable: false, streamDate: null };
       }
 
       const playableStreams = data.streams.filter(s => {
@@ -155,26 +218,28 @@ async function hasLiveStreams(imdbId, season, episode, debugLabel = "") {
         return Boolean(s.url || s.infoHash || s.externalUrl || s.ytId || s.streamData);
       });
 
+      const streamDate = playableStreams.length > 0 ? extractStreamDate(playableStreams) : null;
+
       if (debugLabel) {
-        console.log(`[STREAM DEBUG ${debugLabel}] ${imdbId}:${season}:${episode} -> raw=${rawCount}, playable=${playableStreams.length}`);
+        console.log(`[STREAM DEBUG ${debugLabel}] ${imdbId}:${season}:${episode} -> raw=${rawCount}, playable=${playableStreams.length}, streamDate=${streamDate || "none"}`);
       }
 
-      return playableStreams.length > 0;
+      return { playable: playableStreams.length > 0, streamDate };
     } catch (err) {
       if (debugLabel) {
-        console.log(`[STREAM DEBUG ${debugLabel}] Probe failed for ${imdbId}:${season}:${episode}: ${err?.name || "Error"} - ${err?.message || err}`);
+        console.log(`[STREAM DEBUG ${debugLabel}] Probe failed for ${imdbId}:${season}:${episode} (attempt ${attempt + 1}/2, timeout=${timeoutForAttempt}ms): ${err?.name || "Error"} - ${err?.message || err}`);
       }
       if (err?.name === "AbortError" && attempt === 0) {
-        await sleep(500);
+        await sleep(ABORT_RETRY_DELAY_MS);
         continue;
       }
-      return false;
+      return { playable: false, streamDate: null };
     } finally {
       clearTimeout(timer);
     }
   }
 
-  return false;
+  return { playable: false, streamDate: null };
 }
 
 async function getTmdbMetadata(tmdbId, country = "US") {
@@ -326,6 +391,7 @@ function evaluateExclusion(tmdbId, showName, tmdbMeta) {
 async function build() {
   const startedAt = Date.now();
   const discoveredShows = new Map();
+  const availabilityState = loadStreamAvailability();
 
   console.log(`Discovering English adult shows from TMDB (${LOOKAHEAD_DAYS}-day lookahead + ${RETENTION_DAYS_BACK}-day window)...`);
   if (!STREAM_ADDON_URL) {
@@ -402,18 +468,15 @@ async function build() {
     const lastEpDate = lastEp?.air_date || "";
     const nextEpDate = nextEp?.air_date || "";
 
-    // Keep the listed/discovered date intact without clamping unverified shows
     const listedDate = discoveredDate;
     let sortDate = listedDate;
 
     const probeTargets = [];
     if (STREAM_ADDON_URL && imdbId) {
-      // 1. Probe last_episode_to_air when recent or airing today (catches drops set to air today)
       if (lastEp && lastEpDate && lastEpDate >= recentCutoffStr) {
         probeTargets.push({ season: lastEp.season_number, episode: lastEp.episode_number });
       }
 
-      // 2. Probe next_episode_to_air when scheduled within [todayStr, maxFutureStr]
       if (nextEp && nextEpDate >= todayStr && nextEpDate <= maxFutureStr) {
         const alreadyQueued = probeTargets.some(
           t => t.season === nextEp.season_number && t.episode === nextEp.episode_number
@@ -423,7 +486,6 @@ async function build() {
         }
       }
 
-      // 3. Fallback to (lastEp + 1) for early unscheduled drops when nextEp is absent or past maxFutureStr
       if (lastEp && (!nextEp || nextEpDate > maxFutureStr) && (audit.whitelisted || sortDate >= recentCutoffStr)) {
         const nextNum = (lastEp.episode_number || 0) + 1;
         const alreadyQueued = probeTargets.some(
@@ -452,7 +514,8 @@ async function build() {
       sortDate,
       probeTargets,
       streamVerified: false,
-      clampedToToday: false
+      streamAvailableDate: null,
+      clampedToDate: null
     };
   });
 
@@ -464,22 +527,37 @@ async function build() {
   await mapWithConcurrency(streamCheckTargets, STREAM_CONCURRENCY, async (item) => {
     for (const target of item.probeTargets) {
       await sleep(STREAM_PACING_MS);
-      const liveNow = await hasLiveStreams(item.imdbId, target.season, target.episode, item.debugLabel);
-      if (liveNow) {
+      const { playable, streamDate } = await checkLiveStreams(item.imdbId, target.season, target.episode, item.debugLabel);
+      if (playable) {
+        const key = `${item.imdbId}:${target.season}:${target.episode}`;
+        const savedDate = availabilityState[key];
+
+        let availableDate = streamDate || savedDate || todayStr;
+        if (streamDate && savedDate && savedDate < streamDate) {
+          availableDate = savedDate;
+        }
+        if (!streamDate && savedDate && savedDate < todayStr) {
+          availableDate = savedDate;
+        }
+
+        availabilityState[key] = availableDate;
         item.streamVerified = true;
-        // Clamp to today only when streams exist AND the listed date differs from today
-        if (item.listedDate !== todayStr) {
-          item.sortDate = todayStr;
-          item.clampedToToday = true;
+        item.streamAvailableDate = availableDate;
+
+        if (item.listedDate !== availableDate) {
+          item.sortDate = availableDate;
+          item.clampedToDate = availableDate;
         }
         break;
       }
     }
   });
 
+  saveStreamAvailability(availabilityState);
+
   const metas = activeCandidates.map((item) => {
     const liveBadge = item.streamVerified
-      ? (item.clampedToToday ? `YES (Clamped ${item.listedDate} -> ${todayStr})` : "YES (Today)")
+      ? (item.clampedToDate ? `YES (Clamped ${item.listedDate} -> ${item.clampedToDate})` : `YES (${item.streamAvailableDate})`)
       : "-";
 
     auditLogs.push({
@@ -507,7 +585,6 @@ async function build() {
   });
 
   metas.sort((a, b) => {
-    // 1. Live-stream verified shows always lead at the top
     if (a._streamVerified !== b._streamVerified) {
       return a._streamVerified ? -1 : 1;
     }
@@ -515,7 +592,6 @@ async function build() {
       return b._sortDate.localeCompare(a._sortDate);
     }
 
-    // 2. Unverified shows: past/today (<= todayStr) rank ahead of future (> todayStr)
     const aIsFuture = a._sortDate > todayStr;
     const bIsFuture = b._sortDate > todayStr;
 
@@ -523,7 +599,6 @@ async function build() {
       return aIsFuture ? 1 : -1;
     }
 
-    // Past/today descending (newest first); future ascending (nearest upcoming date first)
     return aIsFuture
       ? a._sortDate.localeCompare(b._sortDate)
       : b._sortDate.localeCompare(a._sortDate);
