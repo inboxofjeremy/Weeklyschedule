@@ -11,7 +11,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TMDB_API_KEY = process.env.TMDB_API_KEY;
 // Base URL of your Stremio stream addon WITHOUT trailing slash or /manifest.json
 // Example: https://aiostreams.example.com/your-config-id
-const STREAM_ADDON_URL = (process.env.STREAM_ADDON_URL || "").replace(/\/manifest\.json\/?$/, "").replace(/\/$/, "");
+const STREAM_ADDON_URL = (process.env.STREAM_ADDON_URL || "")
+  .replace(/\/manifest\.json\/?$/, "")
+  .replace(/\/$/, "");
 
 if (!TMDB_API_KEY || TMDB_API_KEY.trim() === "") {
   console.error("\n❌ ERROR: TMDB_API_KEY environment variable is not defined or is empty!\n");
@@ -19,8 +21,8 @@ if (!TMDB_API_KEY || TMDB_API_KEY.trim() === "") {
 }
 
 const CATALOG_DIR = path.join(__dirname, "catalog", "series");
-const LOOKAHEAD_DAYS = 3;
-const RETENTION_DAYS_BACK = 9;
+const LOOKAHEAD_DAYS = 3; // Catch streaming episodes dropping up to 3 days before TMDB's official date
+const RETENTION_DAYS_BACK = 9; // 9-day rolling window
 
 const auditLogs = [];
 
@@ -35,6 +37,22 @@ async function fetchJSON(url, timeoutMs = 8000) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function mapWithConcurrency(items, concurrency, workerFn) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+
+  async function worker() {
+    while (nextIndex < items.length) {
+      const current = nextIndex++;
+      results[current] = await workerFn(items[current], current);
+    }
+  }
+
+  const runners = Array.from({ length: Math.min(concurrency, items.length) }, worker);
+  await Promise.all(runners);
+  return results;
 }
 
 function pacificDateString(date = new Date()) {
@@ -58,7 +76,7 @@ async function hasLiveStreams(imdbId, season, episode) {
   if (!STREAM_ADDON_URL || !imdbId || season == null || episode == null) return false;
 
   const streamUrl = `${STREAM_ADDON_URL}/stream/series/${imdbId}:${season}:${episode}.json`;
-  const data = await fetchJSON(streamUrl, 4500);
+  const data = await fetchJSON(streamUrl, 2500);
 
   if (!data || !Array.isArray(data.streams) || data.streams.length === 0) {
     return false;
@@ -101,9 +119,13 @@ async function getTmdbMetadata(tmdbId, country = "US") {
   };
 }
 
+// ---------------------------------------------------------------------------------
+// EXCLUSION & FILTER LOGIC
+// ---------------------------------------------------------------------------------
 function evaluateExclusion(tmdbId, showName, tmdbMeta) {
   const name = (showName || "").toLowerCase();
 
+  // 1. Hardcoded Whitelist Overrides (IDs and Titles)
   const whitelistedIds = [1554, 312415]; // QI, QI XL
   const whitelistedTitles = [
     "qi",
@@ -123,6 +145,7 @@ function evaluateExclusion(tmdbId, showName, tmdbMeta) {
     return { exclude: false, reason: "Whitelisted Override" };
   }
 
+  // 2. User Rating Check: Exclude unrated (0 votes) or ratings below 5%
   if (tmdbMeta.voteCount === 0 || (tmdbMeta.voteAverage !== null && tmdbMeta.voteAverage < 0.5)) {
     return { exclude: true, reason: `Excluded: Unrated or rating below 5% (Votes: ${tmdbMeta.voteCount})` };
   }
@@ -133,6 +156,7 @@ function evaluateExclusion(tmdbId, showName, tmdbMeta) {
   const keywords = (tmdbMeta.keywords || []).map(k => k.toLowerCase());
   const lowerOverview = (tmdbMeta.details.overview || "").toLowerCase();
 
+  // 3. Language & Foreign Script Checks
   if (lang !== "en") {
     return { exclude: true, reason: `Excluded: Non-English language ('${lang}')` };
   }
@@ -142,6 +166,7 @@ function evaluateExclusion(tmdbId, showName, tmdbMeta) {
     return { exclude: true, reason: `Excluded: Contains foreign script (${showName})` };
   }
 
+  // 4. Blocked Networks
   const blockedNetworks = [
     "iqiyi", "bilibili", "wavve", "youku", "tencent qq", "vivaone",
     "premier", "смотрим", "кион", "geo entertainment", "tokyo mx"
@@ -150,6 +175,7 @@ function evaluateExclusion(tmdbId, showName, tmdbMeta) {
     return { exclude: true, reason: `Excluded: Blocked Network (${networks.join(", ")})` };
   }
 
+  // 5. Professional Wrestling Exclusion
   const wrestlingTerms = [
     "wwe", "aew", "njpw", "impact wrestling", "ring of honor", "smackdown",
     "wrestlemania", "royal rumble", "professional wrestling", "pro wrestling"
@@ -162,6 +188,7 @@ function evaluateExclusion(tmdbId, showName, tmdbMeta) {
     return { exclude: true, reason: `Excluded: Professional Wrestling (${showName})` };
   }
 
+  // 6. Exclude Vertical Short Dramas / Micro-Series patterns
   if (
     name.includes("san pito pato") ||
     name.includes("dragon baby") ||
@@ -173,6 +200,7 @@ function evaluateExclusion(tmdbId, showName, tmdbMeta) {
     return { exclude: true, reason: "Excluded: Vertical short-drama / micro-series pattern" };
   }
 
+  // 7. Allowed Reality / Renovation / Game Shows
   const allowedGenres = ["panel", "quiz", "game show", "game-show", "reality", "home improvement", "renovation"];
   if (
     genres.some(g => allowedGenres.some(a => g.includes(a))) ||
@@ -182,6 +210,7 @@ function evaluateExclusion(tmdbId, showName, tmdbMeta) {
     return { exclude: false, reason: "Allowed Reality/Renovation Content" };
   }
 
+  // 8. Excluded Categories (Sports, News, Talk, Pure Documentary)
   if (genres.some(g => g.includes("sports"))) {
     return { exclude: true, reason: "Excluded: Sports" };
   }
@@ -196,6 +225,7 @@ function evaluateExclusion(tmdbId, showName, tmdbMeta) {
 }
 
 async function build() {
+  const startedAt = Date.now();
   const discoveredShows = new Map();
 
   console.log(`Discovering English adult shows from TMDB (${LOOKAHEAD_DAYS}-day lookahead + ${RETENTION_DAYS_BACK}-day window)...`);
@@ -208,7 +238,12 @@ async function build() {
   maxFutureDate.setDate(maxFutureDate.getDate() + LOOKAHEAD_DAYS);
   const maxFutureStr = pacificDateString(maxFutureDate);
 
+  const dayOffsets = [];
   for (let i = -LOOKAHEAD_DAYS; i < RETENTION_DAYS_BACK; i++) {
+    dayOffsets.push(i);
+  }
+
+  await mapWithConcurrency(dayOffsets, 6, async (i) => {
     const d = new Date();
     d.setDate(d.getDate() - i);
     const dateStr = pacificDateString(d);
@@ -218,10 +253,10 @@ async function build() {
 
     do {
       const discoverUrl = `https://api.themoviedb.org/3/discover/tv?api_key=${TMDB_API_KEY}&air_date.gte=${dateStr}&air_date.lte=${dateStr}&with_original_language=en&sort_by=popularity.desc&page=${page}`;
-      const data = await fetchJSON(discoverUrl);
+      const data = await fetchJSON(discoverUrl, 6000);
 
       if (data?.results) {
-        totalPages = data.total_pages || 1;
+        totalPages = Math.min(data.total_pages || 1, 10);
         for (const show of data.results) {
           if (!discoveredShows.has(show.id)) {
             discoveredShows.set(show.id, dateStr);
@@ -230,21 +265,25 @@ async function build() {
       }
       page++;
     } while (page <= totalPages);
-  }
+  });
 
-  console.log(`Discovered ${discoveredShows.size} unique candidate shows. Evaluating metadata...`);
+  const candidates = Array.from(discoveredShows.entries());
+  console.log(`Discovered ${candidates.length} unique candidate shows in ${((Date.now() - startedAt) / 1000).toFixed(1)}s. Evaluating metadata...`);
 
-  const metas = [];
-  for (const [tmdbId, latestAirDate] of discoveredShows.entries()) {
+  const evaluated = await mapWithConcurrency(candidates, 8, async ([tmdbId, latestAirDate], idx) => {
+    if ((idx + 1) % 50 === 0 || idx + 1 === candidates.length) {
+      console.log(`Metadata progress: ${idx + 1}/${candidates.length} (${((Date.now() - startedAt) / 1000).toFixed(1)}s)`);
+    }
+
     const tmdbMeta = await getTmdbMetadata(tmdbId);
-    if (!tmdbMeta) continue;
+    if (!tmdbMeta) return null;
 
     const showName = tmdbMeta.details.name;
     const audit = evaluateExclusion(tmdbId, showName, tmdbMeta);
 
     if (audit.exclude) {
       auditLogs.push({ name: showName, status: "DROPPED BY FILTER", detail: audit.reason });
-      continue;
+      return null;
     }
 
     const imdbId = tmdbMeta.imdbId || null;
@@ -257,48 +296,68 @@ async function build() {
     const nextEpDate = nextEp?.air_date || "";
 
     let trueAirDate = latestAirDate;
-    let streamVerified = false;
-
-    // 1. If TMDB already lists last_episode_to_air up through today, use it
     if (lastEpDate && lastEpDate > trueAirDate && lastEpDate <= todayStr) {
       trueAirDate = lastEpDate;
     }
 
-    // 2. If next_episode_to_air is scheduled within the next 3 days, check if streams are already live
-    if (nextEpDate && nextEpDate >= todayStr && nextEpDate <= maxFutureStr) {
-      const liveNow = await hasLiveStreams(imdbId, nextEp.season_number, nextEp.episode_number);
-      if (liveNow) {
-        trueAirDate = todayStr;
-        streamVerified = true;
-      } else if (nextEpDate === todayStr) {
-        trueAirDate = todayStr;
-      }
+    const hasUpcomingCandidate =
+      Boolean(STREAM_ADDON_URL && imdbId && nextEp && nextEpDate >= todayStr && nextEpDate <= maxFutureStr);
+
+    return {
+      tmdbId,
+      showName,
+      audit,
+      imdbId,
+      stremioId,
+      tmdbDetails,
+      tmdbMeta,
+      trueAirDate,
+      hasUpcomingCandidate,
+      nextSeason: nextEp?.season_number,
+      nextEpisode: nextEp?.episode_number,
+      streamVerified: false
+    };
+  });
+
+  const activeCandidates = evaluated.filter(Boolean);
+  const streamCheckTargets = activeCandidates.filter(item => item.hasUpcomingCandidate);
+
+  console.log(`Checking live streams for ${streamCheckTargets.length} upcoming candidates (concurrency=4, timeout=2500ms)...`);
+
+  await mapWithConcurrency(streamCheckTargets, 4, async (item) => {
+    const liveNow = await hasLiveStreams(item.imdbId, item.nextSeason, item.nextEpisode);
+    if (liveNow) {
+      item.trueAirDate = todayStr;
+      item.streamVerified = true;
+    } else if (item.tmdbDetails.next_episode_to_air?.air_date === todayStr) {
+      item.trueAirDate = todayStr;
     }
+  });
 
-    metas.push({
-      id: stremioId,
-      imdb_id: imdbId || undefined,
-      tmdb_id: tmdbId,
-      type: "series",
-      name: showName,
-      genres: tmdbMeta.genres,
-      year: tmdbDetails.first_air_date ? tmdbDetails.first_air_date.split("-")[0] : undefined,
-      description: tmdbDetails.overview || "",
-      poster: tmdbDetails.poster_path ? `https://image.tmdb.org/t/p/original${tmdbDetails.poster_path}` : null,
-      background: tmdbDetails.backdrop_path ? `https://image.tmdb.org/t/p/original${tmdbDetails.backdrop_path}` : null,
-      latestAirDate: trueAirDate
-    });
-
+  const metas = activeCandidates.map((item) => {
     auditLogs.push({
-      name: showName,
+      name: item.showName,
       status: "KEPT",
-      airDate: trueAirDate,
-      liveStream: streamVerified ? "YES (Promoted)" : "-",
-      detail: audit.reason
+      airDate: item.trueAirDate,
+      liveStream: item.streamVerified ? "YES (Promoted)" : "-",
+      detail: item.audit.reason
     });
-  }
 
-  // Sort by most recent air date descending
+    return {
+      id: item.stremioId,
+      imdb_id: item.imdbId || undefined,
+      tmdb_id: item.tmdbId,
+      type: "series",
+      name: item.showName,
+      genres: item.tmdbMeta.genres,
+      year: item.tmdbDetails.first_air_date ? item.tmdbDetails.first_air_date.split("-")[0] : undefined,
+      description: item.tmdbDetails.overview || "",
+      poster: item.tmdbDetails.poster_path ? `https://image.tmdb.org/t/p/original${item.tmdbDetails.poster_path}` : null,
+      background: item.tmdbDetails.backdrop_path ? `https://image.tmdb.org/t/p/original${item.tmdbDetails.backdrop_path}` : null,
+      latestAirDate: item.trueAirDate
+    };
+  });
+
   metas.sort((a, b) => b.latestAirDate.localeCompare(a.latestAirDate));
   metas.forEach(show => { delete show.latestAirDate; });
 
@@ -311,7 +370,7 @@ async function build() {
   console.log("=================================================================================");
   console.table(auditLogs);
   console.log("=================================================================================\n");
-  console.log(`Successfully generated ${metas.length} adult shows in the catalog.`);
+  console.log(`Successfully generated ${metas.length} adult shows in ${((Date.now() - startedAt) / 1000).toFixed(1)}s.`);
 }
 
 build().catch(err => { console.error(err); process.exit(1); });
