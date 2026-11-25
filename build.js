@@ -1,6 +1,7 @@
 /**
  * build.js — Stremio & Wako compatible static adult catalog
  * TMDB Daily Discover (3-Day Lookahead + 9-Day Rolling Window) + Live Stream Addon Verification
+ * Unverified future dates without streams are demoted behind today and confirmed drops.
  */
 
 import fs from "fs";
@@ -270,7 +271,7 @@ async function build() {
   const candidates = Array.from(discoveredShows.entries());
   console.log(`Discovered ${candidates.length} unique candidate shows in ${((Date.now() - startedAt) / 1000).toFixed(1)}s. Evaluating metadata...`);
 
-  const evaluated = await mapWithConcurrency(candidates, 8, async ([tmdbId, latestAirDate], idx) => {
+  const evaluated = await mapWithConcurrency(candidates, 8, async ([tmdbId, discoveredDate], idx) => {
     if ((idx + 1) % 50 === 0 || idx + 1 === candidates.length) {
       console.log(`Metadata progress: ${idx + 1}/${candidates.length} (${((Date.now() - startedAt) / 1000).toFixed(1)}s)`);
     }
@@ -295,9 +296,10 @@ async function build() {
     const lastEpDate = lastEp?.air_date || "";
     const nextEpDate = nextEp?.air_date || "";
 
-    let trueAirDate = latestAirDate;
-    if (lastEpDate && lastEpDate > trueAirDate && lastEpDate <= todayStr) {
-      trueAirDate = lastEpDate;
+    // Base sort date starts at discoveredDate, but never lets an unconfirmed future date outrank today
+    let sortDate = discoveredDate > todayStr ? todayStr : discoveredDate;
+    if (lastEpDate && lastEpDate > sortDate && lastEpDate <= todayStr) {
+      sortDate = lastEpDate;
     }
 
     const hasUpcomingCandidate =
@@ -311,7 +313,9 @@ async function build() {
       stremioId,
       tmdbDetails,
       tmdbMeta,
-      trueAirDate,
+      lastEpDate,
+      nextEpDate,
+      sortDate,
       hasUpcomingCandidate,
       nextSeason: nextEp?.season_number,
       nextEpisode: nextEp?.episode_number,
@@ -327,18 +331,31 @@ async function build() {
   await mapWithConcurrency(streamCheckTargets, 4, async (item) => {
     const liveNow = await hasLiveStreams(item.imdbId, item.nextSeason, item.nextEpisode);
     if (liveNow) {
-      item.trueAirDate = todayStr;
+      // Confirmed early drop or live stream: promote straight to today
+      item.sortDate = todayStr;
       item.streamVerified = true;
-    } else if (item.tmdbDetails.next_episode_to_air?.air_date === todayStr) {
-      item.trueAirDate = todayStr;
+    } else if (item.nextEpDate === todayStr) {
+      // Airing officially today
+      item.sortDate = todayStr;
+    } else {
+      // Future episode has no live streams yet: keep demoted to last aired episode (or earlier)
+      const fallbackDate = item.lastEpDate && item.lastEpDate <= todayStr
+        ? item.lastEpDate
+        : (item.sortDate <= todayStr ? item.sortDate : todayStr);
+      item.sortDate = fallbackDate > todayStr ? todayStr : fallbackDate;
     }
   });
 
   const metas = activeCandidates.map((item) => {
+    // Hard safety guard so unverified items never get a sort date ahead of todayStr
+    const finalSortDate = (!item.streamVerified && item.sortDate > todayStr)
+      ? ((item.lastEpDate && item.lastEpDate <= todayStr) ? item.lastEpDate : todayStr)
+      : item.sortDate;
+
     auditLogs.push({
       name: item.showName,
       status: "KEPT",
-      airDate: item.trueAirDate,
+      sortDate: finalSortDate,
       liveStream: item.streamVerified ? "YES (Promoted)" : "-",
       detail: item.audit.reason
     });
@@ -354,12 +371,12 @@ async function build() {
       description: item.tmdbDetails.overview || "",
       poster: item.tmdbDetails.poster_path ? `https://image.tmdb.org/t/p/original${item.tmdbDetails.poster_path}` : null,
       background: item.tmdbDetails.backdrop_path ? `https://image.tmdb.org/t/p/original${item.tmdbDetails.backdrop_path}` : null,
-      latestAirDate: item.trueAirDate
+      _sortDate: finalSortDate
     };
   });
 
-  metas.sort((a, b) => b.latestAirDate.localeCompare(a.latestAirDate));
-  metas.forEach(show => { delete show.latestAirDate; });
+  metas.sort((a, b) => b._sortDate.localeCompare(a._sortDate));
+  metas.forEach(show => { delete show._sortDate; });
 
   if (!fs.existsSync(CATALOG_DIR)) fs.mkdirSync(CATALOG_DIR, { recursive: true });
   const filePath = path.join(CATALOG_DIR, "tvmaze_weekly_schedule.json");
