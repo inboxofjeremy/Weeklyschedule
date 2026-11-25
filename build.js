@@ -1,8 +1,8 @@
 /**
  * build.js — Stremio & Wako compatible static adult catalog
  * TMDB Daily Discover (3-Day Lookahead + 9-Day Rolling Window) + Live Stream Addon Verification
- * Uniform 2500ms stream probe with next-episode fallback for all kept shows;
- * unverified future dates without streams are demoted behind today and confirmed drops.
+ * Probes next_episode_to_air (in lookahead) or last_episode + 1 (when nextEp is missing or beyond lookahead),
+ * promotes confirmed live streams to the top, and keeps unverified future dates below today.
  */
 
 import fs from "fs";
@@ -71,24 +71,26 @@ function pacificDateString(date = new Date()) {
 }
 
 /**
- * Checks the configured Stremio stream addon using a uniform 2500ms timeout
- * to see if the target episode has already dropped and is playable right now.
+ * Checks the configured Stremio stream addon to see if the target episode
+ * has already dropped and is playable right now.
  */
 async function hasLiveStreams(imdbId, season, episode) {
   if (!STREAM_ADDON_URL || !imdbId || season == null || episode == null) return false;
 
   const streamUrl = `${STREAM_ADDON_URL}/stream/series/${imdbId}:${season}:${episode}.json`;
-  const data = await fetchJSON(streamUrl, 2500);
+  const data = await fetchJSON(streamUrl, 4500);
 
   if (!data || !Array.isArray(data.streams) || data.streams.length === 0) {
     return false;
   }
 
-  // Filter out info/error cards that don't have a playable url, infoHash, or externalUrl
-  const playableStreams = data.streams.filter(s =>
-    (s.url || s.infoHash || s.externalUrl) &&
-    !/no streams|not found|error|rate limit/i.test(`${s.name || ""} ${s.title || ""}`)
-  );
+  const playableStreams = data.streams.filter(s => {
+    const label = `${s.name || ""} ${s.title || ""} ${s.description || ""}`;
+    if (/no streams|not found|error|rate limit|addon error/i.test(label)) {
+      return false;
+    }
+    return Boolean(s.url || s.infoHash || s.externalUrl || s.ytId || s.streamData);
+  });
 
   return playableStreams.length > 0;
 }
@@ -322,21 +324,20 @@ async function build() {
       sortDate = lastEpDate;
     }
 
-    // Uniform probe target for every kept show:
-    // 1) next_episode_to_air within [todayStr, maxFutureStr]
-    // 2) fallback to (lastEp.season_number, lastEp.episode_number + 1) when nextEp is absent within the active window
-    let probeTarget = null;
+    // Build list of candidate (season, episode) targets to probe uniformly for every kept show:
+    // - next_episode_to_air when scheduled within [todayStr, maxFutureStr]
+    // - last_episode + 1 when nextEp is missing or scheduled after maxFutureStr and the show is in the rolling window
+    const probeTargets = [];
     if (STREAM_ADDON_URL && imdbId) {
       if (nextEp && nextEpDate >= todayStr && nextEpDate <= maxFutureStr) {
-        probeTarget = {
-          season: nextEp.season_number,
-          episode: nextEp.episode_number
-        };
-      } else if (!nextEp && lastEp && sortDate >= rollingCutoffStr) {
-        probeTarget = {
-          season: lastEp.season_number,
-          episode: (lastEp.episode_number || 0) + 1
-        };
+        probeTargets.push({ season: nextEp.season_number, episode: nextEp.episode_number });
+      }
+      if (lastEp && sortDate >= rollingCutoffStr && (!nextEp || nextEpDate > maxFutureStr)) {
+        const nextNum = (lastEp.episode_number || 0) + 1;
+        const alreadyQueued = probeTargets.some(t => t.season === lastEp.season_number && t.episode === nextNum);
+        if (!alreadyQueued) {
+          probeTargets.push({ season: lastEp.season_number, episode: nextNum });
+        }
       }
     }
 
@@ -351,32 +352,36 @@ async function build() {
       lastEpDate,
       nextEpDate,
       sortDate,
-      probeTarget,
+      probeTargets,
       streamVerified: false
     };
   });
 
   const activeCandidates = evaluated.filter(Boolean);
-  const streamCheckTargets = activeCandidates.filter(item => Boolean(item.probeTarget));
+  const streamCheckTargets = activeCandidates.filter(item => item.probeTargets.length > 0);
 
-  console.log(`Checking live streams for ${streamCheckTargets.length} shows (concurrency=4, timeout=2500ms)...`);
+  console.log(`Checking live streams for ${streamCheckTargets.length} shows (concurrency=6, timeout=4500ms)...`);
 
-  await mapWithConcurrency(streamCheckTargets, 4, async (item) => {
-    const { season, episode } = item.probeTarget;
-    const liveNow = await hasLiveStreams(item.imdbId, season, episode);
+  await mapWithConcurrency(streamCheckTargets, 6, async (item) => {
+    for (const target of item.probeTargets) {
+      const liveNow = await hasLiveStreams(item.imdbId, target.season, target.episode);
+      if (liveNow) {
+        item.sortDate = todayStr;
+        item.streamVerified = true;
+        break;
+      }
+    }
 
-    if (liveNow) {
-      item.sortDate = todayStr;
-      item.streamVerified = true;
-    } else if (item.nextEpDate === todayStr) {
-      item.sortDate = todayStr;
-    } else if (item.sortDate > todayStr) {
-      item.sortDate = (item.lastEpDate && item.lastEpDate <= todayStr) ? item.lastEpDate : todayStr;
+    if (!item.streamVerified) {
+      if (item.nextEpDate === todayStr) {
+        item.sortDate = todayStr;
+      } else if (item.sortDate > todayStr) {
+        item.sortDate = (item.lastEpDate && item.lastEpDate <= todayStr) ? item.lastEpDate : todayStr;
+      }
     }
   });
 
   const metas = activeCandidates.map((item) => {
-    // Hard safety guard so unverified future dates never float ahead of today
     const finalSortDate = (!item.streamVerified && item.sortDate > todayStr)
       ? ((item.lastEpDate && item.lastEpDate <= todayStr) ? item.lastEpDate : todayStr)
       : item.sortDate;
@@ -400,12 +405,22 @@ async function build() {
       description: item.tmdbDetails.overview || "",
       poster: item.tmdbDetails.poster_path ? `https://image.tmdb.org/t/p/original${item.tmdbDetails.poster_path}` : null,
       background: item.tmdbDetails.backdrop_path ? `https://image.tmdb.org/t/p/original${item.tmdbDetails.backdrop_path}` : null,
-      _sortDate: finalSortDate
+      _sortDate: finalSortDate,
+      _streamVerified: item.streamVerified
     };
   });
 
-  metas.sort((a, b) => b._sortDate.localeCompare(a._sortDate));
-  metas.forEach(show => { delete show._sortDate; });
+  metas.sort((a, b) => {
+    if (a._streamVerified !== b._streamVerified) {
+      return a._streamVerified ? -1 : 1;
+    }
+    return b._sortDate.localeCompare(a._sortDate);
+  });
+
+  metas.forEach(show => {
+    delete show._sortDate;
+    delete show._streamVerified;
+  });
 
   if (!fs.existsSync(CATALOG_DIR)) fs.mkdirSync(CATALOG_DIR, { recursive: true });
   const filePath = path.join(CATALOG_DIR, "tvmaze_weekly_schedule.json");
