@@ -1,7 +1,8 @@
 /**
  * build.js — Stremio & Wako compatible static adult catalog
  * TMDB Daily Discover (3-Day Lookahead + 9-Day Rolling Window) + Live Stream Addon Verification
- * Unverified future dates without streams are demoted behind today and confirmed drops.
+ * Uniform 2500ms stream probe with next-episode fallback for all kept shows;
+ * unverified future dates without streams are demoted behind today and confirmed drops.
  */
 
 import fs from "fs";
@@ -70,8 +71,8 @@ function pacificDateString(date = new Date()) {
 }
 
 /**
- * Checks the configured Stremio stream addon to see if an upcoming episode
- * has already dropped and is playable right now.
+ * Checks the configured Stremio stream addon using a uniform 2500ms timeout
+ * to see if the target episode has already dropped and is playable right now.
  */
 async function hasLiveStreams(imdbId, season, episode) {
   if (!STREAM_ADDON_URL || !imdbId || season == null || episode == null) return false;
@@ -154,7 +155,7 @@ function evaluateExclusion(tmdbId, showName, tmdbMeta) {
   const genres = (tmdbMeta.genres || []).map(g => g.toLowerCase());
   const lang = (tmdbMeta.originalLanguage || "").toLowerCase();
   const networks = (tmdbMeta.networks || []).map(n => n.toLowerCase());
-  const keywords = (tmdbMeta.keywords || []).map(k => k.toLowerCase());
+  const keywords = (tmdbMeta.keywords || []).map(k => k.name.toLowerCase());
   const lowerOverview = (tmdbMeta.details.overview || "").toLowerCase();
 
   // 3. Language & Foreign Script Checks
@@ -234,10 +235,16 @@ async function build() {
     console.warn("⚠️ STREAM_ADDON_URL not set — skipping live stream availability checks.");
   }
 
-  const todayStr = pacificDateString(new Date());
-  const maxFutureDate = new Date();
+  const now = new Date();
+  const todayStr = pacificDateString(now);
+
+  const maxFutureDate = new Date(now);
   maxFutureDate.setDate(maxFutureDate.getDate() + LOOKAHEAD_DAYS);
   const maxFutureStr = pacificDateString(maxFutureDate);
+
+  const rollingCutoffDate = new Date(now);
+  rollingCutoffDate.setDate(rollingCutoffDate.getDate() - RETENTION_DAYS_BACK);
+  const rollingCutoffStr = pacificDateString(rollingCutoffDate);
 
   const dayOffsets = [];
   for (let i = -LOOKAHEAD_DAYS; i < RETENTION_DAYS_BACK; i++) {
@@ -245,7 +252,7 @@ async function build() {
   }
 
   await mapWithConcurrency(dayOffsets, 6, async (i) => {
-    const d = new Date();
+    const d = new Date(now);
     d.setDate(d.getDate() - i);
     const dateStr = pacificDateString(d);
 
@@ -296,14 +303,29 @@ async function build() {
     const lastEpDate = lastEp?.air_date || "";
     const nextEpDate = nextEp?.air_date || "";
 
-    // Base sort date starts at discoveredDate, but never lets an unconfirmed future date outrank today
+    // Base sort date starts at discoveredDate, never allowing an unconfirmed future date to outrank today
     let sortDate = discoveredDate > todayStr ? todayStr : discoveredDate;
     if (lastEpDate && lastEpDate > sortDate && lastEpDate <= todayStr) {
       sortDate = lastEpDate;
     }
 
-    const hasUpcomingCandidate =
-      Boolean(STREAM_ADDON_URL && imdbId && nextEp && nextEpDate >= todayStr && nextEpDate <= maxFutureStr);
+    // Uniform probe target for every kept show:
+    // 1) next_episode_to_air within [todayStr, maxFutureStr]
+    // 2) fallback to (lastEp.season_number, lastEp.episode_number + 1) when nextEp is absent within the active window
+    let probeTarget = null;
+    if (STREAM_ADDON_URL && imdbId) {
+      if (nextEp && nextEpDate >= todayStr && nextEpDate <= maxFutureStr) {
+        probeTarget = {
+          season: nextEp.season_number,
+          episode: nextEp.episode_number
+        };
+      } else if (!nextEp && lastEp && sortDate >= rollingCutoffStr) {
+        probeTarget = {
+          season: lastEp.season_number,
+          episode: (lastEp.episode_number || 0) + 1
+        };
+      }
+    }
 
     return {
       tmdbId,
@@ -316,38 +338,32 @@ async function build() {
       lastEpDate,
       nextEpDate,
       sortDate,
-      hasUpcomingCandidate,
-      nextSeason: nextEp?.season_number,
-      nextEpisode: nextEp?.episode_number,
+      probeTarget,
       streamVerified: false
     };
   });
 
   const activeCandidates = evaluated.filter(Boolean);
-  const streamCheckTargets = activeCandidates.filter(item => item.hasUpcomingCandidate);
+  const streamCheckTargets = activeCandidates.filter(item => Boolean(item.probeTarget));
 
-  console.log(`Checking live streams for ${streamCheckTargets.length} upcoming candidates (concurrency=4, timeout=2500ms)...`);
+  console.log(`Checking live streams for ${streamCheckTargets.length} shows (concurrency=4, timeout=2500ms)...`);
 
   await mapWithConcurrency(streamCheckTargets, 4, async (item) => {
-    const liveNow = await hasLiveStreams(item.imdbId, item.nextSeason, item.nextEpisode);
+    const { season, episode } = item.probeTarget;
+    const liveNow = await hasLiveStreams(item.imdbId, season, episode);
+
     if (liveNow) {
-      // Confirmed early drop or live stream: promote straight to today
       item.sortDate = todayStr;
       item.streamVerified = true;
     } else if (item.nextEpDate === todayStr) {
-      // Airing officially today
       item.sortDate = todayStr;
-    } else {
-      // Future episode has no live streams yet: keep demoted to last aired episode (or earlier)
-      const fallbackDate = item.lastEpDate && item.lastEpDate <= todayStr
-        ? item.lastEpDate
-        : (item.sortDate <= todayStr ? item.sortDate : todayStr);
-      item.sortDate = fallbackDate > todayStr ? todayStr : fallbackDate;
+    } else if (item.sortDate > todayStr) {
+      item.sortDate = (item.lastEpDate && item.lastEpDate <= todayStr) ? item.lastEpDate : todayStr;
     }
   });
 
   const metas = activeCandidates.map((item) => {
-    // Hard safety guard so unverified items never get a sort date ahead of todayStr
+    // Hard safety guard so unverified future dates never float ahead of today
     const finalSortDate = (!item.streamVerified && item.sortDate > todayStr)
       ? ((item.lastEpDate && item.lastEpDate <= todayStr) ? item.lastEpDate : todayStr)
       : item.sortDate;
