@@ -31,6 +31,7 @@ jobs:
       - name: Build catalog
         env:
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+          STREAM_ADDON_URL: ${{ secrets.STREAM_ADDON_URL }}
         run: node build.js
 
       - name: Prepare folder for Pages
