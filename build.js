@@ -1,7 +1,8 @@
 /**
  * build.js — Stremio & Wako compatible static adult catalog
- * TMDB Daily Discover (9-Day Window, Fully Automated Dynamic Pagination)
- * Includes: Rules, Short Drama Filter, Wrestling Filter, Whitelist Overrides, & Unrated/<5% Excludes.
+ * TMDB Daily Discover (3-Day Lookahead + 9-Day Rolling Window, Fully Automated Dynamic Pagination)
+ * Includes: Early Scraper Drop Lookahead, Live Air-Date Resolution, Short Drama Filter,
+ * Wrestling Filter, Whitelist Overrides, & Unrated/<5% Excludes.
  */
 
 import fs from "fs";
@@ -17,6 +18,7 @@ if (!TMDB_API_KEY || TMDB_API_KEY.trim() === "") {
 }
 
 const CATALOG_DIR = path.join(__dirname, "catalog", "series");
+const LOOKAHEAD_DAYS = 3; // Catch streaming episodes dropping up to 3 days before TMDB's official date
 const RETENTION_DAYS_BACK = 9; // 9-day rolling window
 
 const auditLogs = [];
@@ -175,10 +177,15 @@ function evaluateExclusion(tmdbId, showName, tmdbMeta) {
 async function build() {
   const discoveredShows = new Map(); // tmdbId -> latestAirDate
 
-  console.log(`Discovering English adult shows from TMDB across the past ${RETENTION_DAYS_BACK} days (Fully Automated Dynamic Pagination)...`);
+  console.log(`Discovering English adult shows from TMDB (${LOOKAHEAD_DAYS}-day lookahead + ${RETENTION_DAYS_BACK}-day window)...`);
 
-  // Fully automated pagination loop based strictly on TMDB's total_pages response
-  for (let i = 0; i < RETENTION_DAYS_BACK; i++) {
+  const todayStr = pacificDateString(new Date());
+  const maxFutureDate = new Date();
+  maxFutureDate.setDate(maxFutureDate.getDate() + LOOKAHEAD_DAYS);
+  const maxFutureStr = pacificDateString(maxFutureDate);
+
+  // Start at -LOOKAHEAD_DAYS to capture upcoming releases already live on scrapers, then scan backward
+  for (let i = -LOOKAHEAD_DAYS; i < RETENTION_DAYS_BACK; i++) {
     const d = new Date();
     d.setDate(d.getDate() - i);
     const dateStr = pacificDateString(d);
@@ -222,6 +229,17 @@ async function build() {
     const stremioId = `tmdb:${tmdbId}`;
     const tmdbDetails = tmdbMeta.details;
 
+    // Cross-check live show details so upcoming or today's episodes surface immediately
+    const lastEpDate = tmdbDetails.last_episode_to_air?.air_date || "";
+    const nextEpDate = tmdbDetails.next_episode_to_air?.air_date || "";
+
+    let trueAirDate = latestAirDate;
+    if (nextEpDate && nextEpDate >= todayStr && nextEpDate <= maxFutureStr) {
+      trueAirDate = nextEpDate;
+    } else if (lastEpDate && lastEpDate > trueAirDate && lastEpDate <= todayStr) {
+      trueAirDate = lastEpDate;
+    }
+
     metas.push({
       id: stremioId,
       imdb_id: imdbId || undefined,
@@ -233,13 +251,13 @@ async function build() {
       description: tmdbDetails.overview || "",
       poster: tmdbDetails.poster_path ? `https://image.tmdb.org/t/p/original${tmdbDetails.poster_path}` : null,
       background: tmdbDetails.backdrop_path ? `https://image.tmdb.org/t/p/original${tmdbDetails.backdrop_path}` : null,
-      latestAirDate: latestAirDate
+      latestAirDate: trueAirDate
     });
 
-    auditLogs.push({ name: showName, status: "KEPT", detail: audit.reason });
+    auditLogs.push({ name: showName, status: "KEPT", airDate: trueAirDate, detail: audit.reason });
   }
 
-  // Sort by most recent air date
+  // Sort by most recent/upcoming air date descending
   metas.sort((a, b) => b.latestAirDate.localeCompare(a.latestAirDate));
   metas.forEach(show => { delete show.latestAirDate; });
 
