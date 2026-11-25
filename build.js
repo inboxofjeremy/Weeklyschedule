@@ -1,8 +1,6 @@
 /**
  * build.js — Stremio & Wako compatible static adult catalog
- * TMDB Daily Discover (3-Day Lookahead + 9-Day Rolling Window) + Live Stream Addon Verification
- * Uniform 2500ms stream probe with next-episode fallback and diagnostic logging for all kept shows;
- * unverified future dates without streams are demoted behind today and confirmed drops.
+ * TMDB Daily Discover (3-Day Lookahead + 9-Day Rolling Window) + Rate-Limit-Safe Live Stream Verification
  */
 
 import fs from "fs";
@@ -34,8 +32,15 @@ if (!TMDB_API_KEY || TMDB_API_KEY.trim() === "") {
 const CATALOG_DIR = path.join(__dirname, "catalog", "series");
 const LOOKAHEAD_DAYS = 3; // Catch streaming episodes dropping up to 3 days before TMDB's official date
 const RETENTION_DAYS_BACK = 9; // 9-day rolling window
+const RECENT_FALLBACK_DAYS = 3; // Only check lastEp + 1 for shows aired within the past 3 days or whitelisted
+const STREAM_CONCURRENCY = 2; // Keep low to avoid HTTP 429 rate limits on AIOStreams
+const STREAM_PACING_MS = 300; // Brief pause between stream probes
 
 const auditLogs = [];
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
 
 async function fetchJSON(url, timeoutMs = 8000) {
   const controller = new AbortController();
@@ -80,9 +85,8 @@ function pacificDateString(date = new Date()) {
 }
 
 /**
- * Checks the configured Stremio stream addon using a uniform 2500ms timeout
- * to see if the target episode has already dropped and is playable right now.
- * Logs diagnostic details uniformly for any probed show.
+ * Checks the configured Stremio stream addon to see if the target episode
+ * has already dropped and is playable right now, backing off once on HTTP 429.
  */
 async function hasLiveStreams(imdbId, season, episode, debugLabel = "") {
   if (!STREAM_ADDON_URL || !imdbId || season == null || episode == null) {
@@ -93,57 +97,77 @@ async function hasLiveStreams(imdbId, season, episode, debugLabel = "") {
   }
 
   const streamUrl = `${STREAM_ADDON_URL}/stream/series/${imdbId}:${season}:${episode}.json`;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 2500);
 
-  try {
-    const res = await fetch(streamUrl, {
-      signal: controller.signal,
-      headers: {
-        "User-Agent": "Mozilla/5.0 Stremio",
-        "Accept": "application/json"
-      }
-    });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 3500);
 
-    if (!res.ok) {
-      if (debugLabel) {
-        console.log(`[STREAM DEBUG ${debugLabel}] HTTP ${res.status} for ${imdbId}:${season}:${episode} (${streamUrl})`);
-      }
-      return false;
-    }
+    try {
+      const res = await fetch(streamUrl, {
+        signal: controller.signal,
+        headers: {
+          "User-Agent": "Mozilla/5.0 Stremio",
+          "Accept": "application/json"
+        }
+      });
 
-    const data = await res.json();
-    const rawCount = Array.isArray(data?.streams) ? data.streams.length : -1;
-
-    if (!Array.isArray(data?.streams) || data.streams.length === 0) {
-      if (debugLabel) {
-        console.log(`[STREAM DEBUG ${debugLabel}] Empty streams array (${rawCount}) for ${imdbId}:${season}:${episode}`);
-      }
-      return false;
-    }
-
-    const playableStreams = data.streams.filter(s => {
-      if (!s || typeof s !== "object") return false;
-      const label = `${s.name || ""} ${s.title || ""} ${s.description || ""}`;
-      if (/no streams|not found|error|rate limit|addon error/i.test(label)) {
+      if (res.status === 429) {
+        const retryAfterSec = Number(res.headers.get("retry-after"));
+        const waitMs = Number.isFinite(retryAfterSec) && retryAfterSec > 0
+          ? Math.min(retryAfterSec * 1000, 5000)
+          : 1500 * (attempt + 1);
+        if (debugLabel) {
+          console.log(`[STREAM DEBUG ${debugLabel}] HTTP 429 for ${imdbId}:${season}:${episode} — backing off ${waitMs}ms (attempt ${attempt + 1}/2)`);
+        }
+        if (attempt === 0) {
+          await sleep(waitMs);
+          continue;
+        }
         return false;
       }
-      return Boolean(s.url || s.infoHash || s.externalUrl || s.ytId || s.streamData);
-    });
 
-    if (debugLabel) {
-      console.log(`[STREAM DEBUG ${debugLabel}] ${imdbId}:${season}:${episode} -> raw=${rawCount}, playable=${playableStreams.length}`);
-    }
+      if (!res.ok) {
+        if (debugLabel) {
+          console.log(`[STREAM DEBUG ${debugLabel}] HTTP ${res.status} for ${imdbId}:${season}:${episode}`);
+        }
+        return false;
+      }
 
-    return playableStreams.length > 0;
-  } catch (err) {
-    if (debugLabel) {
-      console.log(`[STREAM DEBUG ${debugLabel}] Probe failed for ${imdbId}:${season}:${episode}: ${err?.name || "Error"} - ${err?.message || err}`);
+      const data = await res.json();
+      const rawCount = Array.isArray(data?.streams) ? data.streams.length : -1;
+
+      if (!Array.isArray(data?.streams) || data.streams.length === 0) {
+        if (debugLabel) {
+          console.log(`[STREAM DEBUG ${debugLabel}] Empty streams array (${rawCount}) for ${imdbId}:${season}:${episode}`);
+        }
+        return false;
+      }
+
+      const playableStreams = data.streams.filter(s => {
+        if (!s || typeof s !== "object") return false;
+        const label = `${s.name || ""} ${s.title || ""} ${s.description || ""}`;
+        if (/no streams|not found|error|rate limit|addon error/i.test(label)) {
+          return false;
+        }
+        return Boolean(s.url || s.infoHash || s.externalUrl || s.ytId || s.streamData);
+      });
+
+      if (debugLabel) {
+        console.log(`[STREAM DEBUG ${debugLabel}] ${imdbId}:${season}:${episode} -> raw=${rawCount}, playable=${playableStreams.length}`);
+      }
+
+      return playableStreams.length > 0;
+    } catch (err) {
+      if (debugLabel) {
+        console.log(`[STREAM DEBUG ${debugLabel}] Probe failed for ${imdbId}:${season}:${episode}: ${err?.name || "Error"} - ${err?.message || err}`);
+      }
+      return false;
+    } finally {
+      clearTimeout(timer);
     }
-    return false;
-  } finally {
-    clearTimeout(timer);
   }
+
+  return false;
 }
 
 async function getTmdbMetadata(tmdbId, country = "US") {
@@ -197,12 +221,12 @@ function evaluateExclusion(tmdbId, showName, tmdbMeta) {
     whitelistedIds.includes(Number(tmdbId)) ||
     whitelistedTitles.some(title => name === title || name.includes(title))
   ) {
-    return { exclude: false, reason: "Whitelisted Override" };
+    return { exclude: false, reason: "Whitelisted Override", whitelisted: true };
   }
 
   // 2. User Rating Check: Exclude unrated (0 votes) or ratings below 5%
   if (tmdbMeta.voteCount === 0 || (tmdbMeta.voteAverage !== null && tmdbMeta.voteAverage < 0.5)) {
-    return { exclude: true, reason: `Excluded: Unrated or rating below 5% (Votes: ${tmdbMeta.voteCount})` };
+    return { exclude: true, reason: `Excluded: Unrated or rating below 5% (Votes: ${tmdbMeta.voteCount})`, whitelisted: false };
   }
 
   const genres = (tmdbMeta.genres || [])
@@ -226,12 +250,12 @@ function evaluateExclusion(tmdbId, showName, tmdbMeta) {
 
   // 3. Language & Foreign Script Checks
   if (lang !== "en") {
-    return { exclude: true, reason: `Excluded: Non-English language ('${lang}')` };
+    return { exclude: true, reason: `Excluded: Non-English language ('${lang}')`, whitelisted: false };
   }
 
   const nonEnglishCharRegex = /[\u4e00-\u9fa5\u3040-\u30ff\u3130-\u318f\u0400-\u04ff]/;
   if (nonEnglishCharRegex.test(showName)) {
-    return { exclude: true, reason: `Excluded: Contains foreign script (${showName})` };
+    return { exclude: true, reason: `Excluded: Contains foreign script (${showName})`, whitelisted: false };
   }
 
   // 4. Blocked Networks
@@ -240,7 +264,7 @@ function evaluateExclusion(tmdbId, showName, tmdbMeta) {
     "premier", "смотрим", "кион", "geo entertainment", "tokyo mx"
   ];
   if (networks.some(net => blockedNetworks.some(b => net.includes(b)))) {
-    return { exclude: true, reason: `Excluded: Blocked Network (${networks.join(", ")})` };
+    return { exclude: true, reason: `Excluded: Blocked Network (${networks.join(", ")})`, whitelisted: false };
   }
 
   // 5. Professional Wrestling Exclusion
@@ -253,7 +277,7 @@ function evaluateExclusion(tmdbId, showName, tmdbMeta) {
     keywords.some(k => k.includes("wrestling")) ||
     (lowerOverview.includes("wrestling") && (lowerOverview.includes("ring") || lowerOverview.includes("championship")))
   ) {
-    return { exclude: true, reason: `Excluded: Professional Wrestling (${showName})` };
+    return { exclude: true, reason: `Excluded: Professional Wrestling (${showName})`, whitelisted: false };
   }
 
   // 6. Exclude Vertical Short Dramas / Micro-Series patterns
@@ -265,7 +289,7 @@ function evaluateExclusion(tmdbId, showName, tmdbMeta) {
     lowerOverview.includes("short drama") ||
     (name.includes("devil") && lowerOverview.includes("billionaire"))
   ) {
-    return { exclude: true, reason: "Excluded: Vertical short-drama / micro-series pattern" };
+    return { exclude: true, reason: "Excluded: Vertical short-drama / micro-series pattern", whitelisted: false };
   }
 
   // 7. Allowed Reality / Renovation / Game Shows
@@ -275,21 +299,21 @@ function evaluateExclusion(tmdbId, showName, tmdbMeta) {
     name.includes("zombie") ||
     name.includes("beach")
   ) {
-    return { exclude: false, reason: "Allowed Reality/Renovation Content" };
+    return { exclude: false, reason: "Allowed Reality/Renovation Content", whitelisted: false };
   }
 
   // 8. Excluded Categories (Sports, News, Talk, Pure Documentary)
   if (genres.some(g => g.includes("sports"))) {
-    return { exclude: true, reason: "Excluded: Sports" };
+    return { exclude: true, reason: "Excluded: Sports", whitelisted: false };
   }
   if (genres.some(g => g.includes("news") || g.includes("talk"))) {
-    return { exclude: true, reason: "Excluded: News/Talk" };
+    return { exclude: true, reason: "Excluded: News/Talk", whitelisted: false };
   }
   if (genres.some(g => g === "documentary")) {
-    return { exclude: true, reason: "Excluded: Pure Documentary" };
+    return { exclude: true, reason: "Excluded: Pure Documentary", whitelisted: false };
   }
 
-  return { exclude: false, reason: "Passed general rules" };
+  return { exclude: false, reason: "Passed general rules", whitelisted: false };
 }
 
 async function build() {
@@ -310,9 +334,9 @@ async function build() {
   maxFutureDate.setDate(maxFutureDate.getDate() + LOOKAHEAD_DAYS);
   const maxFutureStr = pacificDateString(maxFutureDate);
 
-  const rollingCutoffDate = new Date(now);
-  rollingCutoffDate.setDate(rollingCutoffDate.getDate() - RETENTION_DAYS_BACK);
-  const rollingCutoffStr = pacificDateString(rollingCutoffDate);
+  const recentCutoffDate = new Date(now);
+  recentCutoffDate.setDate(recentCutoffDate.getDate() - RECENT_FALLBACK_DAYS);
+  const recentCutoffStr = pacificDateString(recentCutoffDate);
 
   const dayOffsets = [];
   for (let i = -LOOKAHEAD_DAYS; i < RETENTION_DAYS_BACK; i++) {
@@ -380,13 +404,8 @@ async function build() {
     if (STREAM_ADDON_URL && imdbId) {
       if (nextEp && nextEpDate >= todayStr && nextEpDate <= maxFutureStr) {
         probeTargets.push({ season: nextEp.season_number, episode: nextEp.episode_number });
-      }
-      if (lastEp && sortDate >= rollingCutoffStr && (!nextEp || nextEpDate > maxFutureStr)) {
-        const nextNum = (lastEp.episode_number || 0) + 1;
-        const alreadyQueued = probeTargets.some(t => t.season === lastEp.season_number && t.episode === nextNum);
-        if (!alreadyQueued) {
-          probeTargets.push({ season: lastEp.season_number, episode: nextNum });
-        }
+      } else if (lastEp && (!nextEp || nextEpDate > maxFutureStr) && (audit.whitelisted || sortDate >= recentCutoffStr)) {
+        probeTargets.push({ season: lastEp.season_number, episode: (lastEp.episode_number || 0) + 1 });
       }
     }
 
@@ -412,10 +431,11 @@ async function build() {
   const activeCandidates = evaluated.filter(Boolean);
   const streamCheckTargets = activeCandidates.filter(item => item.probeTargets.length > 0);
 
-  console.log(`Checking live streams for ${streamCheckTargets.length} shows (concurrency=6, timeout=2500ms)...`);
+  console.log(`Checking live streams for ${streamCheckTargets.length} shows (concurrency=${STREAM_CONCURRENCY}, pacing=${STREAM_PACING_MS}ms)...`);
 
-  await mapWithConcurrency(streamCheckTargets, 6, async (item) => {
+  await mapWithConcurrency(streamCheckTargets, STREAM_CONCURRENCY, async (item) => {
     for (const target of item.probeTargets) {
+      await sleep(STREAM_PACING_MS);
       const liveNow = await hasLiveStreams(item.imdbId, target.season, target.episode, item.debugLabel);
       if (liveNow) {
         item.sortDate = todayStr;
