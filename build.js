@@ -112,10 +112,10 @@ async function getTmdbMetadata(tmdbId, country = "US") {
     details,
     certification: ratingObj ? ratingObj.rating : null,
     imdbId: externalIds?.imdb_id || null,
-    genres: details.genres ? details.genres.map(g => g.name) : [],
-    keywords: kwList.map(k => k.name),
+    genres: Array.isArray(details.genres) ? details.genres.map(g => g?.name).filter(Boolean) : [],
+    keywords: Array.isArray(kwList) ? kwList.map(k => k?.name).filter(Boolean) : [],
     originalLanguage: details.original_language,
-    networks: (details.networks || []).map(n => n.name),
+    networks: Array.isArray(details.networks) ? details.networks.map(n => n?.name).filter(Boolean) : [],
     voteAverage: details.vote_average ?? null,
     voteCount: details.vote_count ?? 0
   };
@@ -152,10 +152,23 @@ function evaluateExclusion(tmdbId, showName, tmdbMeta) {
     return { exclude: true, reason: `Excluded: Unrated or rating below 5% (Votes: ${tmdbMeta.voteCount})` };
   }
 
-  const genres = (tmdbMeta.genres || []).map(g => g.toLowerCase());
+  const genres = (tmdbMeta.genres || [])
+    .map(g => (typeof g === "string" ? g : g?.name || ""))
+    .filter(Boolean)
+    .map(g => g.toLowerCase());
+
   const lang = (tmdbMeta.originalLanguage || "").toLowerCase();
-  const networks = (tmdbMeta.networks || []).map(n => n.toLowerCase());
-  const keywords = (tmdbMeta.keywords || []).map(k => k.name.toLowerCase());
+
+  const networks = (tmdbMeta.networks || [])
+    .map(n => (typeof n === "string" ? n : n?.name || ""))
+    .filter(Boolean)
+    .map(n => n.toLowerCase());
+
+  const keywords = (tmdbMeta.keywords || [])
+    .map(k => (typeof k === "string" ? k : k?.name || ""))
+    .filter(Boolean)
+    .map(k => k.toLowerCase());
+
   const lowerOverview = (tmdbMeta.details.overview || "").toLowerCase();
 
   // 3. Language & Foreign Script Checks
