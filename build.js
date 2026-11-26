@@ -1,7 +1,7 @@
 /**
  * build.js — Stremio & Wako compatible static catalog + meta generator
  * TMDB Daily Discover + Next-Episode.net dates
- * All dates come strictly from next-episode.net (zero TMDB air_date usage).
+ * Zero TMDB air_date usage.
  */
 
 import fs from "fs";
@@ -23,9 +23,11 @@ const RETENTION_DAYS_BACK = 9;
 const NEXT_EPISODE_CONCURRENCY = 3;
 const NEXT_EPISODE_DELAY_MS = 200;
 
+// Set to a show name (e.g. "Stick") to inspect exact responses quickly, or "" for full run
+const DEBUG_ONLY_SHOW = "Stick";
+
 const auditLogs = [];
 const htmlCache = new Map();
-let debugSampleCount = 0;
 
 const MONTHS = {
   jan: "01",
@@ -63,7 +65,7 @@ async function fetchJSON(url, timeoutMs = 8000) {
   }
 }
 
-async function fetchNextEpisodeHTML(url, timeoutMs = 7000, retries = 2) {
+async function fetchNextEpisodeHTML(url, timeoutMs = 7000, retries = 1) {
   if (htmlCache.has(url)) {
     return htmlCache.get(url);
   }
@@ -78,34 +80,31 @@ async function fetchNextEpisodeHTML(url, timeoutMs = 7000, retries = 2) {
         headers: {
           "User-Agent":
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
           "Accept-Language": "en-US,en;q=0.9",
-          "Cache-Control": "no-cache",
           "Referer": "https://next-episode.net/"
         }
       });
 
-      if (debugSampleCount < 8) {
-        debugSampleCount++;
-        console.log(`[NE Debug] ${url} -> HTTP ${res.status}`);
+      const text = await res.text();
+      if (DEBUG_ONLY_SHOW) {
+        console.log(`[FETCH] ${url} -> status=${res.status} bytes=${text.length} head=${JSON.stringify(text.slice(0, 180))}`);
       }
 
       if ((res.status === 429 || res.status === 503) && attempt < retries) {
-        await sleep(1000 * (attempt + 1));
+        await sleep(800 * (attempt + 1));
         continue;
       }
 
-      const text = await res.text();
       const result = res.ok ? text : null;
       htmlCache.set(url, result);
       return result;
     } catch (err) {
-      if (debugSampleCount < 8) {
-        debugSampleCount++;
-        console.log(`[NE Debug] ${url} -> Error: ${err?.message || "fetch failed"}`);
+      if (DEBUG_ONLY_SHOW) {
+        console.log(`[FETCH ERR] ${url} -> ${err?.message || String(err)}`);
       }
       if (attempt < retries) {
-        await sleep(600 * (attempt + 1));
+        await sleep(500 * (attempt + 1));
         continue;
       }
       htmlCache.set(url, null);
@@ -241,9 +240,6 @@ function scoreCandidateMatch(showName, candidateSlug, anchorText = "") {
   return hits / showTokens.length + exactSlugMatch;
 }
 
-/**
- * Parses a /<slug>/season-<N> page into { seasonNumber, episodes: Map<episodeNum, ymd> }
- */
 function parseSeasonTableHtml(html, fallbackSeasonNumber = 0) {
   const result = new Map();
   if (!html) return { seasonNumber: fallbackSeasonNumber, episodes: result };
@@ -289,7 +285,7 @@ function parseShowPageDates(html, cutoffDate) {
 
   const plainText = stripTags(html);
   const dateMatches = [
-    ...plainText.matchAll(/\b(?:[A-Za-z]{3}\s+)?([A-Za-z]{3})\s+(\d{1,2}),\s+(\d{4})\b/g)
+    ...plainText.matchAll(/\b(?:[A-Za-z]{3}\s+)?([A-Za-z]{3})\s+(\d{1,2}),\s+\d{4}\b/g)
   ];
 
   const allDates = [
@@ -443,9 +439,6 @@ async function getTmdbMetadata(tmdbId, country = "US") {
   };
 }
 
-/**
- * Builds Stremio videos so every episode has a next-episode.net date (zero TMDB air_date usage).
- */
 async function buildSeriesVideos(tmdbId, stremioId, tmdbDetails, nextEpisodeData) {
   const seasons = Array.isArray(tmdbDetails.seasons)
     ? tmdbDetails.seasons
@@ -487,13 +480,10 @@ async function buildSeriesVideos(tmdbId, stremioId, tmdbDetails, nextEpisodeData
   return videos;
 }
 
-// ---------------------------------------------------------------------------------
-// EXCLUSION & FILTER LOGIC
-// ---------------------------------------------------------------------------------
 function evaluateExclusion(tmdbId, showName, tmdbMeta) {
   const name = (showName || "").toLowerCase();
 
-  const whitelistedIds = [1554, 312415]; // QI, QI XL
+  const whitelistedIds = [1554, 312415];
   const whitelistedTitles = [
     "qi",
     "qi xl",
@@ -612,6 +602,24 @@ async function build() {
   const startedAt = Date.now();
   const discoveredIds = new Set();
   const todayStr = pacificDateString();
+
+  if (DEBUG_ONLY_SHOW) {
+    const searchJson = await fetchJSON(
+      `https://api.themoviedb.org/3/search/tv?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(DEBUG_ONLY_SHOW)}`
+    );
+    const firstId = searchJson?.results?.[0]?.id;
+    console.log(`[DEBUG MODE] Show="${DEBUG_ONLY_SHOW}" -> TMDB id=${firstId}`);
+    if (firstId) {
+      const meta = await getTmdbMetadata(firstId);
+      const maxSeasonHint = Array.isArray(meta?.details?.seasons)
+        ? Math.max(1, ...meta.details.seasons.map(s => Number(s.season_number) || 0))
+        : 1;
+      const neData = await getNextEpisodeScheduleData(meta.details.name, todayStr, maxSeasonHint);
+      console.log("[DEBUG RESULT] primaryDate:", neData.primaryDate, "mapSize:", neData.episodeDateMap.size);
+      console.log("[DEBUG RESULT] sample map:", [...neData.episodeDateMap.entries()].slice(-10));
+    }
+    return;
+  }
 
   console.log(`Discovering English shows from TMDB (${LOOKAHEAD_DAYS}-day lookahead + ${RETENTION_DAYS_BACK}-day window)...`);
 
