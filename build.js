@@ -1,7 +1,7 @@
 /**
  * build.js — Stremio & Wako compatible static catalog + meta generator
  * TMDB Daily Discover + Next-Episode.net dates
- * Dates come strictly from next-episode.net (no TMDB air_date usage).
+ * Every episode receives a next-episode.net date (no TMDB air_date usage).
  */
 
 import fs from "fs";
@@ -180,7 +180,7 @@ function htmlToPlainText(html) {
  * Extracts Next-Episode.net dates and Season/Episode mappings strictly from next-episode.net HTML.
  */
 function parseNextEpisodeScheduleHtml(html, cutoffDate) {
-  if (!html) return { primaryDate: "", episodeDateMap: new Map() };
+  if (!html) return { primaryDate: "", allDates: [], episodeDateMap: new Map() };
 
   const plainText = htmlToPlainText(html);
   const episodeDateMap = new Map();
@@ -194,12 +194,12 @@ function parseNextEpisodeScheduleHtml(html, cutoffDate) {
     allDatesSet.add(ymd);
 
     const idx = m.index ?? 0;
-    const windowStart = Math.max(0, idx - 220);
-    const windowEnd = Math.min(plainText.length, idx + m[0].length + 220);
+    const windowStart = Math.max(0, idx - 320);
+    const windowEnd = Math.min(plainText.length, idx + m[0].length + 320);
     const context = plainText.slice(windowStart, windowEnd);
 
     const seMatch =
-      context.match(/\bSeason\s*:?\s*(\d{1,2})\b[\s\S]{0,80}?\bEpisode\s*:?\s*(\d{1,2})\b/i) ||
+      context.match(/\bSeason\s*:?\s*(\d{1,2})\b[\s\S]{0,120}?\bEpisode\s*:?\s*(\d{1,2})\b/i) ||
       context.match(/\bS(\d{1,2})\s*E(\d{1,2})\b/i) ||
       context.match(/\b(\d{1,2})x(\d{1,2})\b/i);
 
@@ -214,21 +214,21 @@ function parseNextEpisodeScheduleHtml(html, cutoffDate) {
 
   const allDates = [...allDatesSet].sort((a, b) => b.localeCompare(a));
   if (allDates.length === 0) {
-    return { primaryDate: "", episodeDateMap };
+    return { primaryDate: "", allDates: [], episodeDateMap };
   }
 
   const pastOrToday = allDates.find(d => d <= cutoffDate);
   if (pastOrToday) {
-    return { primaryDate: pastOrToday, episodeDateMap };
+    return { primaryDate: pastOrToday, allDates, episodeDateMap };
   }
 
   const upcomingSorted = [...allDates].sort((a, b) => a.localeCompare(b));
-  return { primaryDate: upcomingSorted[0], episodeDateMap };
+  return { primaryDate: upcomingSorted[0], allDates, episodeDateMap };
 }
 
 async function getNextEpisodeScheduleData(showName, cutoffDate) {
   const slugs = toNextEpisodeSlugs(showName);
-  if (slugs.length === 0) return { primaryDate: "", episodeDateMap: new Map() };
+  if (slugs.length === 0) return { primaryDate: "", allDates: [], episodeDateMap: new Map() };
 
   for (const slug of slugs) {
     await sleep(NEXT_EPISODE_DELAY_MS);
@@ -245,7 +245,7 @@ async function getNextEpisodeScheduleData(showName, cutoffDate) {
   await sleep(NEXT_EPISODE_DELAY_MS);
   const searchUrl = `https://next-episode.net/search/?name=${encodeURIComponent(showName)}`;
   const searchHtml = await fetchNextEpisodeHTML(searchUrl);
-  if (!searchHtml) return { primaryDate: "", episodeDateMap: new Map() };
+  if (!searchHtml) return { primaryDate: "", allDates: [], episodeDateMap: new Map() };
 
   const searchParsed = parseNextEpisodeScheduleHtml(searchHtml, cutoffDate);
   if (searchParsed.primaryDate) return searchParsed;
@@ -262,7 +262,7 @@ async function getNextEpisodeScheduleData(showName, cutoffDate) {
     if (matchedParsed.primaryDate) return matchedParsed;
   }
 
-  return { primaryDate: "", episodeDateMap: new Map() };
+  return { primaryDate: "", allDates: [], episodeDateMap: new Map() };
 }
 
 async function getTmdbMetadata(tmdbId, country = "US") {
@@ -294,7 +294,7 @@ async function getTmdbMetadata(tmdbId, country = "US") {
 }
 
 /**
- * Builds Stremio videos using ONLY next-episode.net dates (zero TMDB air_date usage).
+ * Builds Stremio videos so every episode has a next-episode.net date.
  */
 async function buildSeriesVideos(tmdbId, stremioId, tmdbDetails, nextEpisodeData) {
   const seasons = Array.isArray(tmdbDetails.seasons)
@@ -310,7 +310,10 @@ async function buildSeriesVideos(tmdbId, stremioId, tmdbDetails, nextEpisodeData
   );
 
   const episodeDateMap = nextEpisodeData?.episodeDateMap || new Map();
-  const primaryDate = nextEpisodeData?.primaryDate || "";
+  const anchorDate =
+    (isValidYmd(nextEpisodeData?.primaryDate) && nextEpisodeData.primaryDate) ||
+    (Array.isArray(nextEpisodeData?.allDates) && nextEpisodeData.allDates.find(isValidYmd)) ||
+    "";
 
   const videos = [];
   for (const seasonData of seasonPayloads) {
@@ -318,23 +321,16 @@ async function buildSeriesVideos(tmdbId, stremioId, tmdbDetails, nextEpisodeData
     for (const ep of seasonData.episodes) {
       if (typeof ep.episode_number !== "number") continue;
       const key = `${seasonData.season_number}:${ep.episode_number}`;
-      const neYmd = episodeDateMap.get(key) || "";
+      const epDate = episodeDateMap.get(key) || anchorDate;
       videos.push({
         id: `${stremioId}:${seasonData.season_number}:${ep.episode_number}`,
         title: ep.name || `Episode ${ep.episode_number}`,
         season: seasonData.season_number,
         episode: ep.episode_number,
-        released: toIsoMidnight(neYmd),
+        released: toIsoMidnight(epDate),
         overview: ep.overview || undefined,
         thumbnail: ep.still_path ? `https://image.tmdb.org/t/p/w500${ep.still_path}` : undefined
       });
-    }
-  }
-
-  if (isValidYmd(primaryDate) && videos.length > 0) {
-    const primaryIso = toIsoMidnight(primaryDate);
-    if (!videos.some(v => v.released === primaryIso)) {
-      videos[videos.length - 1].released = primaryIso;
     }
   }
 
@@ -539,7 +535,6 @@ async function build() {
     });
   }
 
-  // Sort strictly by next-episode.net date descending; shows without a next-episode.net date sort last
   activeCandidates.sort((a, b) => {
     const aHas = isValidYmd(a.nextEpisodeDate);
     const bHas = isValidYmd(b.nextEpisodeDate);
