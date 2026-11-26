@@ -2,22 +2,28 @@
   "id": "com.yourname.tvmaze.weekly",
   "version": "1.0.0",
   "name": "TVMaze Weekly Schedule",
-  "description": "Self-hosted TVMaze catalog with full metadata override",
+  "description": "Self-hosted static catalog sorted by Next Episode dates with full metadata override",
   "types": ["series"],
-  "idPrefixes": ["tvmaze"],
+  "idPrefixes": ["tmdb:"],
   "resources": [
     "catalog",
     {
       "name": "meta",
       "types": ["series"],
-      "idPrefixes": ["tvmaze"]
+      "idPrefixes": ["tmdb:"]
     }
   ],
   "catalogs": [
     {
       "type": "series",
       "id": "tvmaze_weekly_schedule",
-      "name": "Weekly Schedule"
+      "name": "Weekly Schedule",
+      "extra": [
+        {
+          "name": "skip",
+          "isRequired": false
+        }
+      ]
     }
   ]
 }
