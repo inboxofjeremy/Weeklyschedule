@@ -1,7 +1,7 @@
 /**
- * build.js — Stremio & Wako compatible static adult catalog + meta generator
- * TMDB Daily Discover (3-Day Lookahead + 9-Day Rolling Window)
- * Sorted strictly by Next Episode (next-episode.net) episode air date descending.
+ * build.js — Stremio & Wako compatible static catalog + meta generator
+ * TMDB Daily Discover + Next-Episode.net dates
+ * Poster (releaseInfo), catalog sort, and episode dates aligned to YYYY-MM-DD.
  */
 
 import fs from "fs";
@@ -41,6 +41,10 @@ const MONTHS = {
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function isValidYmd(str) {
+  return typeof str === "string" && /^\d{4}-\d{2}-\d{2}$/.test(str);
 }
 
 async function fetchJSON(url, timeoutMs = 8000) {
@@ -122,8 +126,17 @@ function pacificDateString(date = new Date()) {
   return `${map.year}-${map.month}-${map.day}`;
 }
 
+function addDaysYmd(ymdStr, deltaDays) {
+  const [y, m, d] = ymdStr.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d + deltaDays));
+  const yy = dt.getUTCFullYear();
+  const mm = String(dt.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(dt.getUTCDate()).padStart(2, "0");
+  return `${yy}-${mm}-${dd}`;
+}
+
 function toIsoMidnight(dateStr) {
-  if (!dateStr || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return undefined;
+  if (!isValidYmd(dateStr)) return undefined;
   return `${dateStr}T00:00:00.000Z`;
 }
 
@@ -149,7 +162,8 @@ function parseNextEpisodeDateText(rawDateText) {
 
   const day = match[2].padStart(2, "0");
   const year = match[3];
-  return `${year}-${monthNum}-${day}`;
+  const ymd = `${year}-${monthNum}-${day}`;
+  return isValidYmd(ymd) ? ymd : null;
 }
 
 function htmlToPlainText(html) {
@@ -162,8 +176,13 @@ function htmlToPlainText(html) {
     .replace(/\s+/g, " ");
 }
 
+/**
+ * Extracts all YYYY-MM-DD dates found on a Next-Episode.net page and picks the
+ * best representative air date for the show (preferring dates up to cutoffDate,
+ * or the closest upcoming date if no prior date exists).
+ */
 function extractDatesFromNextEpisodeHtml(html, cutoffDate) {
-  if (!html) return "";
+  if (!html) return { primaryDate: "", allDates: [] };
 
   const plainText = htmlToPlainText(html);
 
@@ -171,26 +190,35 @@ function extractDatesFromNextEpisodeHtml(html, cutoffDate) {
     ...plainText.matchAll(/\bDate\s*:?\s*((?:[A-Za-z]{3}\s+)?[A-Za-z]{3}\s+\d{1,2},\s+\d{4})\b/gi)
   ];
 
-  const parsedDates = dateMatches
-    .map(m => parseNextEpisodeDateText(m[1]))
-    .filter(d => typeof d === "string" && /^\d{4}-\d{2}-\d{2}$/.test(d))
-    .sort((a, b) => b.localeCompare(a));
+  const allDates = [
+    ...new Set(
+      dateMatches
+        .map(m => parseNextEpisodeDateText(m[1]))
+        .filter(isValidYmd)
+    )
+  ].sort((a, b) => b.localeCompare(a));
 
-  if (parsedDates.length === 0) return "";
+  if (allDates.length === 0) return { primaryDate: "", allDates: [] };
 
-  const upToCutoff = parsedDates.find(d => d <= cutoffDate);
-  return upToCutoff || parsedDates[parsedDates.length - 1] || "";
+  // Prefer the most recent air date on or before cutoffDate; otherwise earliest upcoming date
+  const pastOrToday = allDates.find(d => d <= cutoffDate);
+  if (pastOrToday) {
+    return { primaryDate: pastOrToday, allDates };
+  }
+
+  const upcomingSorted = [...allDates].sort((a, b) => a.localeCompare(b));
+  return { primaryDate: upcomingSorted[0], allDates };
 }
 
-async function getNextEpisodeDate(showName, cutoffDate) {
+async function getNextEpisodeScheduleData(showName, cutoffDate) {
   const slugs = toNextEpisodeSlugs(showName);
-  if (slugs.length === 0) return "";
+  if (slugs.length === 0) return { primaryDate: "", allDates: [] };
 
   for (const slug of slugs) {
     await sleep(NEXT_EPISODE_DELAY_MS);
     const directHtml = await fetchNextEpisodeHTML(`https://next-episode.net/${slug}`);
-    const directDate = extractDatesFromNextEpisodeHtml(directHtml, cutoffDate);
-    if (directDate) return directDate;
+    const parsed = extractDatesFromNextEpisodeHtml(directHtml, cutoffDate);
+    if (parsed.primaryDate) return parsed;
   }
 
   const ignoredPaths = new Set([
@@ -201,10 +229,10 @@ async function getNextEpisodeDate(showName, cutoffDate) {
   await sleep(NEXT_EPISODE_DELAY_MS);
   const searchUrl = `https://next-episode.net/search/?name=${encodeURIComponent(showName)}`;
   const searchHtml = await fetchNextEpisodeHTML(searchUrl);
-  if (!searchHtml) return "";
+  if (!searchHtml) return { primaryDate: "", allDates: [] };
 
-  const searchPageDate = extractDatesFromNextEpisodeHtml(searchHtml, cutoffDate);
-  if (searchPageDate) return searchPageDate;
+  const searchParsed = extractDatesFromNextEpisodeHtml(searchHtml, cutoffDate);
+  if (searchParsed.primaryDate) return searchParsed;
 
   const hrefMatches = [...searchHtml.matchAll(/href=["']\/([a-z0-9-]+)["']/gi)]
     .map(m => m[1].toLowerCase())
@@ -214,11 +242,11 @@ async function getNextEpisodeDate(showName, cutoffDate) {
   for (const candidatePath of uniquePaths) {
     await sleep(NEXT_EPISODE_DELAY_MS);
     const matchedHtml = await fetchNextEpisodeHTML(`https://next-episode.net/${candidatePath}`);
-    const matchedDate = extractDatesFromNextEpisodeHtml(matchedHtml, cutoffDate);
-    if (matchedDate) return matchedDate;
+    const matchedParsed = extractDatesFromNextEpisodeHtml(matchedHtml, cutoffDate);
+    if (matchedParsed.primaryDate) return matchedParsed;
   }
 
-  return "";
+  return { primaryDate: "", allDates: [] };
 }
 
 async function getTmdbMetadata(tmdbId, country = "US") {
@@ -249,7 +277,11 @@ async function getTmdbMetadata(tmdbId, country = "US") {
   };
 }
 
-async function buildSeriesVideos(tmdbId, stremioId, tmdbDetails, nextEpisodeDate, cutoffDate) {
+/**
+ * Builds Stremio videos using Next-Episode.net dates when available,
+ * keeping all date strings as plain YYYY-MM-DD until ISO midnight formatting.
+ */
+async function buildSeriesVideos(tmdbId, stremioId, tmdbDetails, nextEpisodeData, cutoffDate) {
   const seasons = Array.isArray(tmdbDetails.seasons)
     ? tmdbDetails.seasons
         .filter(s => typeof s.season_number === "number" && s.season_number > 0)
@@ -267,22 +299,22 @@ async function buildSeriesVideos(tmdbId, stremioId, tmdbDetails, nextEpisodeDate
     if (!seasonData || !Array.isArray(seasonData.episodes)) continue;
     for (const ep of seasonData.episodes) {
       if (typeof ep.episode_number !== "number") continue;
+      const epYmd = isValidYmd(ep.air_date) ? ep.air_date : "";
       videos.push({
         id: `${stremioId}:${seasonData.season_number}:${ep.episode_number}`,
         title: ep.name || `Episode ${ep.episode_number}`,
         season: seasonData.season_number,
         episode: ep.episode_number,
-        released: toIsoMidnight(ep.air_date),
+        released: toIsoMidnight(epYmd),
         overview: ep.overview || undefined,
         thumbnail: ep.still_path ? `https://image.tmdb.org/t/p/w500${ep.still_path}` : undefined
       });
     }
   }
 
-  if (nextEpisodeDate && videos.length > 0) {
-    const nextIso = toIsoMidnight(nextEpisodeDate);
+  const primaryDate = nextEpisodeData?.primaryDate || "";
+  if (primaryDate && videos.length > 0) {
     let targetIdx = -1;
-
     for (let i = videos.length - 1; i >= 0; i--) {
       const epDate = videos[i].released ? videos[i].released.slice(0, 10) : "";
       if (epDate && epDate <= cutoffDate) {
@@ -290,12 +322,10 @@ async function buildSeriesVideos(tmdbId, stremioId, tmdbDetails, nextEpisodeDate
         break;
       }
     }
-
     if (targetIdx === -1) {
       targetIdx = videos.length - 1;
     }
-
-    videos[targetIdx].released = nextIso;
+    videos[targetIdx].released = toIsoMidnight(primaryDate);
   }
 
   return videos;
@@ -419,24 +449,31 @@ function evaluateExclusion(tmdbId, showName, tmdbMeta) {
   return { exclude: false, reason: "Passed general rules", whitelisted: false };
 }
 
+function writeMetaFiles(stremioId, metaObj) {
+  const payload = JSON.stringify({ meta: metaObj }, null, 2);
+  const rawPath = path.join(META_DIR, `${stremioId}.json`);
+  const encodedPath = path.join(META_DIR, `${encodeURIComponent(stremioId)}.json`);
+
+  fs.writeFileSync(rawPath, payload);
+  if (encodedPath !== rawPath) {
+    fs.writeFileSync(encodedPath, payload);
+  }
+}
+
 async function build() {
   const startedAt = Date.now();
   const discoveredShows = new Map();
   const todayStr = pacificDateString();
 
-  console.log(`Discovering English adult shows from TMDB (${LOOKAHEAD_DAYS}-day lookahead + ${RETENTION_DAYS_BACK}-day window)...`);
+  console.log(`Discovering English shows from TMDB (${LOOKAHEAD_DAYS}-day lookahead + ${RETENTION_DAYS_BACK}-day window)...`);
 
-  const now = new Date();
-  const dayOffsets = [];
-  for (let i = -LOOKAHEAD_DAYS; i < RETENTION_DAYS_BACK; i++) {
-    dayOffsets.push(i);
+  // Build exact YYYY-MM-DD date list from (today - RETENTION_DAYS_BACK) through (today + LOOKAHEAD_DAYS)
+  const targetDates = [];
+  for (let offset = -RETENTION_DAYS_BACK; offset <= LOOKAHEAD_DAYS; offset++) {
+    targetDates.push(addDaysYmd(todayStr, offset));
   }
 
-  await mapWithConcurrency(dayOffsets, 6, async (i) => {
-    const d = new Date(now);
-    d.setDate(d.getDate() - i);
-    const dateStr = pacificDateString(d);
-
+  await mapWithConcurrency(targetDates, 6, async (dateStr) => {
     let page = 1;
     let totalPages = 1;
 
@@ -460,7 +497,7 @@ async function build() {
   console.log(`Discovered ${candidates.length} unique candidate shows in ${((Date.now() - startedAt) / 1000).toFixed(1)}s. Evaluating metadata...`);
 
   const filteredCandidates = [];
-  await mapWithConcurrency(candidates, 6, async ([tmdbId], idx) => {
+  await mapWithConcurrency(candidates, 6, async ([tmdbId, tmdbAirDate], idx) => {
     if ((idx + 1) % 50 === 0 || idx + 1 === candidates.length) {
       console.log(`TMDB metadata progress: ${idx + 1}/${candidates.length} (${((Date.now() - startedAt) / 1000).toFixed(1)}s)`);
     }
@@ -480,6 +517,7 @@ async function build() {
       tmdbId,
       showName,
       audit,
+      tmdbAirDate,
       imdbId: tmdbMeta.imdbId || null,
       stremioId: `tmdb:${tmdbId}`,
       tmdbDetails: tmdbMeta.details,
@@ -494,11 +532,26 @@ async function build() {
     if ((i + 1) % 25 === 0 || i + 1 === filteredCandidates.length) {
       console.log(`Next Episode progress: ${i + 1}/${filteredCandidates.length} (${((Date.now() - startedAt) / 1000).toFixed(1)}s)`);
     }
-    const episodeDate = await getNextEpisodeDate(item.showName, todayStr);
-    activeCandidates.push({ ...item, episodeDate });
+    const nextEpisodeData = await getNextEpisodeScheduleData(item.showName, todayStr);
+    const resolvedDate = nextEpisodeData.primaryDate || "";
+    const sortKey = resolvedDate || item.tmdbAirDate || "";
+    activeCandidates.push({
+      ...item,
+      nextEpisodeData,
+      episodeDate: resolvedDate,
+      sortKey
+    });
   }
 
-  activeCandidates.sort((a, b) => b.episodeDate.localeCompare(a.episodeDate));
+  // Sort by resolved YYYY-MM-DD date descending; items without a date sort last
+  activeCandidates.sort((a, b) => {
+    const aHas = isValidYmd(a.sortKey);
+    const bHas = isValidYmd(b.sortKey);
+    if (aHas && bHas) return b.sortKey.localeCompare(a.sortKey);
+    if (aHas) return -1;
+    if (bHas) return 1;
+    return a.showName.localeCompare(b.showName);
+  });
 
   if (!fs.existsSync(CATALOG_DIR)) fs.mkdirSync(CATALOG_DIR, { recursive: true });
   if (!fs.existsSync(META_DIR)) {
@@ -517,16 +570,17 @@ async function build() {
       name: item.showName,
       status: "KEPT",
       episodeDate: item.episodeDate || "-",
+      sortKey: item.sortKey || "-",
       detail: item.audit.reason
     });
 
     const firstYear = item.tmdbDetails.first_air_date ? item.tmdbDetails.first_air_date.split("-")[0] : "";
-    const latestDateOrYear = item.episodeDate || firstYear || undefined;
+    const displayDate = item.episodeDate || item.tmdbAirDate || firstYear || undefined;
     const videos = await buildSeriesVideos(
       item.tmdbId,
       item.stremioId,
       item.tmdbDetails,
-      item.episodeDate,
+      item.nextEpisodeData,
       todayStr
     );
 
@@ -538,15 +592,14 @@ async function build() {
       name: item.showName,
       genres: item.tmdbMeta.genres,
       year: firstYear || undefined,
-      releaseInfo: latestDateOrYear,
+      releaseInfo: displayDate,
       description: item.tmdbDetails.overview || "",
       poster: item.tmdbDetails.poster_path ? `https://image.tmdb.org/t/p/original${item.tmdbDetails.poster_path}` : null,
       background: item.tmdbDetails.backdrop_path ? `https://image.tmdb.org/t/p/original${item.tmdbDetails.backdrop_path}` : null,
       videos
     };
 
-    const metaFilePath = path.join(META_DIR, `${item.stremioId}.json`);
-    fs.writeFileSync(metaFilePath, JSON.stringify({ meta: metaObj }, null, 2));
+    writeMetaFiles(item.stremioId, metaObj);
 
     return {
       id: item.stremioId,
@@ -556,7 +609,7 @@ async function build() {
       name: item.showName,
       genres: item.tmdbMeta.genres,
       year: firstYear || undefined,
-      releaseInfo: latestDateOrYear,
+      releaseInfo: displayDate,
       description: item.tmdbDetails.overview || "",
       poster: item.tmdbDetails.poster_path ? `https://image.tmdb.org/t/p/original${item.tmdbDetails.poster_path}` : null,
       background: item.tmdbDetails.backdrop_path ? `https://image.tmdb.org/t/p/original${item.tmdbDetails.backdrop_path}` : null
@@ -567,11 +620,11 @@ async function build() {
   fs.writeFileSync(filePath, JSON.stringify({ metas }, null, 2));
 
   console.log("\n=================================================================================");
-  console.log("            TMDB DAILY ADULT DISCOVERY REPORT SUMMARY                            ");
+  console.log("            TMDB DAILY DISCOVERY REPORT SUMMARY                                ");
   console.log("=================================================================================");
   console.table(auditLogs);
   console.log("=================================================================================\n");
-  console.log(`Successfully generated ${metas.length} adult shows and meta files in ${((Date.now() - startedAt) / 1000).toFixed(1)}s.`);
+  console.log(`Successfully generated ${metas.length} shows and meta files in ${((Date.now() - startedAt) / 1000).toFixed(1)}s.`);
 }
 
 build().catch(err => { console.error(err); process.exit(1); });
