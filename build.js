@@ -19,7 +19,7 @@ if (!TMDB_API_KEY || TMDB_API_KEY.trim() === "") {
 const CATALOG_DIR = path.join(__dirname, "catalog", "series");
 const LOOKAHEAD_DAYS = 3;
 const RETENTION_DAYS_BACK = 9;
-const DEBUG_NEXT_EPISODE = true;
+const DEBUG_NEXT_EPISODE = false;
 
 let nextEpisodeDebugCount = 0;
 const auditLogs = [];
