@@ -19,7 +19,9 @@ if (!TMDB_API_KEY || TMDB_API_KEY.trim() === "") {
 const CATALOG_DIR = path.join(__dirname, "catalog", "series");
 const LOOKAHEAD_DAYS = 3;
 const RETENTION_DAYS_BACK = 9;
+const DEBUG_NEXT_EPISODE = true;
 
+let nextEpisodeDebugCount = 0;
 const auditLogs = [];
 
 const MONTHS = {
@@ -50,20 +52,31 @@ async function fetchJSON(url, timeoutMs = 8000) {
   }
 }
 
-async function fetchHTML(url, timeoutMs = 8000) {
+async function fetchHTML(url, timeoutMs = 8000, debug = false) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(url, {
       signal: controller.signal,
+      redirect: "follow",
       headers: {
         "User-Agent":
           "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://next-episode.net/"
       }
     });
-    return res.ok ? await res.text() : null;
-  } catch {
+    const text = await res.text();
+    if (debug) {
+      console.log(`[DEBUG] ${url} -> status=${res.status}, finalUrl=${res.url}, len=${text.length}`);
+      console.log(`[DEBUG] sample=${text.replace(/\s+/g, " ").slice(0, 300)}`);
+    }
+    return res.ok ? text : null;
+  } catch (err) {
+    if (debug) {
+      console.log(`[DEBUG] ${url} -> error=${err.message}`);
+    }
     return null;
   } finally {
     clearTimeout(timer);
@@ -99,17 +112,20 @@ function pacificDateString(date = new Date()) {
   return `${map.year}-${map.month}-${map.day}`;
 }
 
-function toNextEpisodeSlug(title) {
-  return (title || "")
+function toNextEpisodeSlugs(title) {
+  const base = (title || "")
     .toLowerCase()
     .replace(/['’]/g, "")
     .replace(/&/g, "and")
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
+    .trim();
+
+  const dashed = base.replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  const compact = base.replace(/[^a-z0-9]+/g, "");
+
+  return [...new Set([dashed, compact].filter(Boolean))];
 }
 
 function parseNextEpisodeDateText(rawDateText) {
-  // Matches e.g. "Tue Nov 24, 2026" or "Nov 24, 2026"
   const match = rawDateText.match(/\b(?:[A-Za-z]{3}\s+)?([A-Za-z]{3})\s+(\d{1,2}),\s+(\d{4})\b/);
   if (!match) return null;
 
@@ -129,10 +145,13 @@ function extractDatesFromNextEpisodeHtml(html, cutoffDate) {
     .replace(/<style[\s\S]*?<\/style>/gi, " ")
     .replace(/<[^>]+>/g, " ")
     .replace(/&nbsp;/gi, " ")
+    .replace(/&#?\w+;/gi, " ")
     .replace(/\s+/g, " ");
 
-  // Look specifically for Next Episode's "Date: Tue Nov 24, 2026" entries in Next/Previous Episode blocks
-  const dateMatches = [...plainText.matchAll(/\bDate:\s*((?:[A-Za-z]{3}\s+)?[A-Za-z]{3}\s+\d{1,2},\s+\d{4})\b/g)];
+  const dateMatches = [
+    ...plainText.matchAll(/\bDate\s*:?\s*((?:[A-Za-z]{3}\s+)?[A-Za-z]{3}\s+\d{1,2},\s+\d{4})\b/gi)
+  ];
+
   const parsedDates = dateMatches
     .map(m => parseNextEpisodeDateText(m[1]))
     .filter(d => typeof d === "string" && /^\d{4}-\d{2}-\d{2}$/.test(d))
@@ -145,34 +164,45 @@ function extractDatesFromNextEpisodeHtml(html, cutoffDate) {
 }
 
 async function getNextEpisodeDate(showName, cutoffDate) {
-  const slug = toNextEpisodeSlug(showName);
-  if (!slug) return "";
+  const slugs = toNextEpisodeSlugs(showName);
+  if (slugs.length === 0) return "";
 
-  // 1. Direct slug lookup: https://next-episode.net/<slug>
-  const directHtml = await fetchHTML(`https://next-episode.net/${slug}`);
-  const directDate = extractDatesFromNextEpisodeHtml(directHtml, cutoffDate);
-  if (directDate) return directDate;
+  const shouldDebug = DEBUG_NEXT_EPISODE && nextEpisodeDebugCount < 3;
+  if (shouldDebug) nextEpisodeDebugCount++;
 
-  // 2. Fallback to Next Episode search if slug differed (e.g., year suffix or punctuation)
+  for (const slug of slugs) {
+    const directHtml = await fetchHTML(`https://next-episode.net/${slug}`, 8000, shouldDebug);
+    const directDate = extractDatesFromNextEpisodeHtml(directHtml, cutoffDate);
+    if (directDate) return directDate;
+  }
+
+  const ignoredPaths = new Set([
+    "browse", "calendar", "login", "register", "search", "news",
+    "trailers", "top", "popular", "recent", "privacy", "terms", "contact", "faq"
+  ]);
+
   const searchUrl = `https://next-episode.net/search/?name=${encodeURIComponent(showName)}`;
-  const searchHtml = await fetchHTML(searchUrl);
+  const searchHtml = await fetchHTML(searchUrl, 8000, shouldDebug);
   if (!searchHtml) return "";
 
-  // If search redirected directly to a show page, parse it
   const searchPageDate = extractDatesFromNextEpisodeHtml(searchHtml, cutoffDate);
   if (searchPageDate) return searchPageDate;
 
-  // Otherwise grab the first matching show link from search results
-  const linkMatch = searchHtml.match(/href=["']\/([a-z0-9-]+)["']/i);
-  if (linkMatch && linkMatch[1] && linkMatch[1] !== slug) {
-    const matchedHtml = await fetchHTML(`https://next-episode.net/${linkMatch[1]}`);
-    return extractDatesFromNextEpisodeHtml(matchedHtml, cutoffDate);
+  const hrefMatches = [...searchHtml.matchAll(/href=["']\/([a-z0-9-]+)["']/gi)]
+    .map(m => m[1].toLowerCase())
+    .filter(p => !ignoredPaths.has(p) && !slugs.includes(p));
+
+  const uniquePaths = [...new Set(hrefMatches)].slice(0, 3);
+  for (const candidatePath of uniquePaths) {
+    const matchedHtml = await fetchHTML(`https://next-episode.net/${candidatePath}`, 8000, shouldDebug);
+    const matchedDate = extractDatesFromNextEpisodeHtml(matchedHtml, cutoffDate);
+    if (matchedDate) return matchedDate;
   }
 
   return "";
 }
 
-async function getTmdbMetadata(tmdbId, cutoffDate, country = "US") {
+async function getTmdbMetadata(tmdbId, country = "US") {
   if (!tmdbId) return null;
 
   const [details, ratingsData, externalIds, keywordsData] = await Promise.all([
@@ -358,12 +388,12 @@ async function build() {
   const candidates = Array.from(discoveredShows.entries());
   console.log(`Discovered ${candidates.length} unique candidate shows in ${((Date.now() - startedAt) / 1000).toFixed(1)}s. Evaluating metadata...`);
 
-  const evaluated = await mapWithConcurrency(candidates, 6, async ([tmdbId], idx) => {
+  const evaluated = await mapWithConcurrency(candidates, 3, async ([tmdbId], idx) => {
     if ((idx + 1) % 50 === 0 || idx + 1 === candidates.length) {
       console.log(`Metadata progress: ${idx + 1}/${candidates.length} (${((Date.now() - startedAt) / 1000).toFixed(1)}s)`);
     }
 
-    const tmdbMeta = await getTmdbMetadata(tmdbId, todayStr);
+    const tmdbMeta = await getTmdbMetadata(tmdbId);
     if (!tmdbMeta) return null;
 
     const showName = tmdbMeta.details.name;
