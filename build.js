@@ -1,7 +1,7 @@
 /**
  * build.js — Stremio & Wako compatible static adult catalog
  * TMDB Daily Discover (3-Day Lookahead + 9-Day Rolling Window)
- * Sorted strictly by next_episode_to_air date descending (with fallback to lastEpDate / discoveredDate).
+ * Sorted by episode release date descending without alphabetical tie-breaking.
  */
 
 import fs from "fs";
@@ -271,7 +271,7 @@ async function build() {
 
     const lastEpDate = tmdbDetails.last_episode_to_air?.air_date || "";
     const nextEpDate = tmdbDetails.next_episode_to_air?.air_date || "";
-    const sortDate = nextEpDate || lastEpDate || discoveredDate;
+    const episodeDate = lastEpDate || nextEpDate || discoveredDate;
 
     return {
       tmdbId,
@@ -281,27 +281,19 @@ async function build() {
       stremioId,
       tmdbDetails,
       tmdbMeta,
-      nextEpDate,
-      lastEpDate,
-      discoveredDate,
-      sortDate
+      episodeDate
     };
   });
 
   const activeCandidates = evaluated.filter(Boolean);
 
-  activeCandidates.sort((a, b) => {
-    const dateCmp = b.sortDate.localeCompare(a.sortDate);
-    if (dateCmp !== 0) return dateCmp;
-    return a.showName.localeCompare(b.showName);
-  });
+  activeCandidates.sort((a, b) => b.episodeDate.localeCompare(a.episodeDate));
 
   const metas = activeCandidates.map((item) => {
     auditLogs.push({
       name: item.showName,
       status: "KEPT",
-      sortDate: item.sortDate,
-      nextEpDate: item.nextEpDate || "-",
+      episodeDate: item.episodeDate,
       detail: item.audit.reason
     });
 
