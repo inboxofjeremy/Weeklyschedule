@@ -1,8 +1,8 @@
 /**
  * build.js — Stremio & Wako compatible static adult catalog
  * TMDB Daily Discover (3-Day Lookahead + 9-Day Rolling Window) + Rate-Limit-Safe Live Stream Verification
- * Extracts stream availability dates from stream payloads when present, falling back to persisted
- * stream availability state or todayStr, and clamps sortDate only when verified and different from listedDate.
+ * Moves shows with live streams to their actual drop date when different from TMDB/listed date,
+ * and sorts all shows strictly by date descending.
  */
 
 import fs from "fs";
@@ -37,8 +37,8 @@ const LOOKAHEAD_DAYS = 3; // Catch streaming episodes dropping up to 3 days befo
 const RETENTION_DAYS_BACK = 9; // 9-day rolling window
 const RECENT_FALLBACK_DAYS = 3; // Probe lastEp and lastEp + 1 for recent/today episodes or whitelisted shows
 const STREAM_CONCURRENCY = Number(process.env.STREAM_CONCURRENCY) || 2; // Keep low to avoid HTTP 429 rate limits on AIOStreams
-const STREAM_PACING_MS = Number(process.env.STREAM_PACING_MS) || 500; // Pause between stream probes to reduce addon load
-const STREAM_PROBE_TIMEOUT_MS = Number(process.env.STREAM_PROBE_TIMEOUT_MS) || 12000; // Allow slower scraper/cache responses to finish
+const STREAM_PACING_MS = Number(process.env.STREAM_PACING_MS) || 600; // Pause between stream probes to reduce addon load
+const STREAM_PROBE_TIMEOUT_MS = Number(process.env.STREAM_PROBE_TIMEOUT_MS) || 13000; // Allow slower scraper/cache responses to finish
 const ABORT_RETRY_DELAY_MS = 1200; // Pause before retrying after an AbortError
 
 const auditLogs = [];
@@ -469,7 +469,7 @@ async function build() {
     const nextEpDate = nextEp?.air_date || "";
 
     const listedDate = discoveredDate;
-    let sortDate = listedDate;
+    const sortDate = listedDate;
 
     const probeTargets = [];
     if (STREAM_ADDON_URL && imdbId) {
@@ -515,7 +515,7 @@ async function build() {
       probeTargets,
       streamVerified: false,
       streamAvailableDate: null,
-      clampedToDate: null
+      movedToDropDate: null
     };
   });
 
@@ -532,21 +532,16 @@ async function build() {
         const key = `${item.imdbId}:${target.season}:${target.episode}`;
         const savedDate = availabilityState[key];
 
-        let availableDate = streamDate || savedDate || todayStr;
-        if (streamDate && savedDate && savedDate < streamDate) {
-          availableDate = savedDate;
-        }
-        if (!streamDate && savedDate && savedDate < todayStr) {
-          availableDate = savedDate;
-        }
+        // Actual drop date: explicit stream payload date -> previously saved state date -> todayStr
+        const dropDate = streamDate || savedDate || todayStr;
+        availabilityState[key] = dropDate;
 
-        availabilityState[key] = availableDate;
         item.streamVerified = true;
-        item.streamAvailableDate = availableDate;
+        item.streamAvailableDate = dropDate;
 
-        if (item.listedDate !== availableDate) {
-          item.sortDate = availableDate;
-          item.clampedToDate = availableDate;
+        if (item.listedDate !== dropDate) {
+          item.sortDate = dropDate;
+          item.movedToDropDate = dropDate;
         }
         break;
       }
@@ -557,7 +552,7 @@ async function build() {
 
   const metas = activeCandidates.map((item) => {
     const liveBadge = item.streamVerified
-      ? (item.clampedToDate ? `YES (Clamped ${item.listedDate} -> ${item.clampedToDate})` : `YES (${item.streamAvailableDate})`)
+      ? (item.movedToDropDate ? `YES (Moved ${item.listedDate} -> ${item.movedToDropDate})` : `YES (${item.streamAvailableDate})`)
       : "-";
 
     auditLogs.push({
@@ -579,34 +574,18 @@ async function build() {
       description: item.tmdbDetails.overview || "",
       poster: item.tmdbDetails.poster_path ? `https://image.tmdb.org/t/p/original${item.tmdbDetails.poster_path}` : null,
       background: item.tmdbDetails.backdrop_path ? `https://image.tmdb.org/t/p/original${item.tmdbDetails.backdrop_path}` : null,
-      _sortDate: item.sortDate,
-      _streamVerified: item.streamVerified
+      _sortDate: item.sortDate
     };
   });
 
   metas.sort((a, b) => {
-    if (a._streamVerified !== b._streamVerified) {
-      return a._streamVerified ? -1 : 1;
-    }
-    if (a._streamVerified && b._streamVerified) {
-      return b._sortDate.localeCompare(a._sortDate);
-    }
-
-    const aIsFuture = a._sortDate > todayStr;
-    const bIsFuture = b._sortDate > todayStr;
-
-    if (aIsFuture !== bIsFuture) {
-      return aIsFuture ? 1 : -1;
-    }
-
-    return aIsFuture
-      ? a._sortDate.localeCompare(b._sortDate)
-      : b._sortDate.localeCompare(a._sortDate);
+    const dateCmp = b._sortDate.localeCompare(a._sortDate);
+    if (dateCmp !== 0) return dateCmp;
+    return a.name.localeCompare(b.name);
   });
 
   metas.forEach(show => {
     delete show._sortDate;
-    delete show._streamVerified;
   });
 
   if (!fs.existsSync(CATALOG_DIR)) fs.mkdirSync(CATALOG_DIR, { recursive: true });
