@@ -24,7 +24,7 @@ const NEXT_EPISODE_CONCURRENCY = 3;
 const NEXT_EPISODE_DELAY_MS = 200;
 
 //Set to a show name (e.g. "Stick") to debug a single show, or "" for full run
-const DEBUG_ONLY_SHOW = "Stick";
+const DEBUG_ONLY_SHOW = "12 12 12";
 
 const auditLogs = [];
 const htmlCache = new Map();
