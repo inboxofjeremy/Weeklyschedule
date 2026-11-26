@@ -1,5 +1,5 @@
 /**
- * build.js — Stremio & Wako compatible static adult catalog
+ * build.js — Stremio & Wako compatible static adult catalog + meta generator
  * TMDB Daily Discover (3-Day Lookahead + 9-Day Rolling Window)
  * Sorted strictly by Next Episode (next-episode.net) episode air date descending.
  */
@@ -17,6 +17,7 @@ if (!TMDB_API_KEY || TMDB_API_KEY.trim() === "") {
 }
 
 const CATALOG_DIR = path.join(__dirname, "catalog", "series");
+const META_DIR = path.join(__dirname, "meta", "series");
 const LOOKAHEAD_DAYS = 3;
 const RETENTION_DAYS_BACK = 9;
 const NEXT_EPISODE_DELAY_MS = 350;
@@ -119,6 +120,11 @@ function pacificDateString(date = new Date()) {
   const map = {};
   parts.forEach(p => { map[p.type] = p.value; });
   return `${map.year}-${map.month}-${map.day}`;
+}
+
+function toIsoMidnight(dateStr) {
+  if (!dateStr || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return undefined;
+  return `${dateStr}T00:00:00.000Z`;
 }
 
 function toNextEpisodeSlugs(title) {
@@ -241,6 +247,58 @@ async function getTmdbMetadata(tmdbId, country = "US") {
     voteAverage: details.vote_average ?? null,
     voteCount: details.vote_count ?? 0
   };
+}
+
+async function buildSeriesVideos(tmdbId, stremioId, tmdbDetails, nextEpisodeDate, cutoffDate) {
+  const seasons = Array.isArray(tmdbDetails.seasons)
+    ? tmdbDetails.seasons
+        .filter(s => typeof s.season_number === "number" && s.season_number > 0)
+        .sort((a, b) => a.season_number - b.season_number)
+    : [];
+
+  const seasonPayloads = await Promise.all(
+    seasons.map(s =>
+      fetchJSON(`https://api.themoviedb.org/3/tv/${tmdbId}/season/${s.season_number}?api_key=${TMDB_API_KEY}`)
+    )
+  );
+
+  const videos = [];
+  for (const seasonData of seasonPayloads) {
+    if (!seasonData || !Array.isArray(seasonData.episodes)) continue;
+    for (const ep of seasonData.episodes) {
+      if (typeof ep.episode_number !== "number") continue;
+      videos.push({
+        id: `${stremioId}:${seasonData.season_number}:${ep.episode_number}`,
+        title: ep.name || `Episode ${ep.episode_number}`,
+        season: seasonData.season_number,
+        episode: ep.episode_number,
+        released: toIsoMidnight(ep.air_date),
+        overview: ep.overview || undefined,
+        thumbnail: ep.still_path ? `https://image.tmdb.org/t/p/w500${ep.still_path}` : undefined
+      });
+    }
+  }
+
+  if (nextEpisodeDate && videos.length > 0) {
+    const nextIso = toIsoMidnight(nextEpisodeDate);
+    let targetIdx = -1;
+
+    for (let i = videos.length - 1; i >= 0; i--) {
+      const epDate = videos[i].released ? videos[i].released.slice(0, 10) : "";
+      if (epDate && epDate <= cutoffDate) {
+        targetIdx = i;
+        break;
+      }
+    }
+
+    if (targetIdx === -1) {
+      targetIdx = videos.length - 1;
+    }
+
+    videos[targetIdx].released = nextIso;
+  }
+
+  return videos;
 }
 
 // ---------------------------------------------------------------------------------
@@ -401,7 +459,6 @@ async function build() {
   const candidates = Array.from(discoveredShows.entries());
   console.log(`Discovered ${candidates.length} unique candidate shows in ${((Date.now() - startedAt) / 1000).toFixed(1)}s. Evaluating metadata...`);
 
-  // Fetch TMDB metadata at concurrency 6, then serialize Next Episode scrapes to avoid 429s
   const filteredCandidates = [];
   await mapWithConcurrency(candidates, 6, async ([tmdbId], idx) => {
     if ((idx + 1) % 50 === 0 || idx + 1 === candidates.length) {
@@ -443,13 +500,53 @@ async function build() {
 
   activeCandidates.sort((a, b) => b.episodeDate.localeCompare(a.episodeDate));
 
-  const metas = activeCandidates.map((item) => {
+  if (!fs.existsSync(CATALOG_DIR)) fs.mkdirSync(CATALOG_DIR, { recursive: true });
+  if (!fs.existsSync(META_DIR)) {
+    fs.mkdirSync(META_DIR, { recursive: true });
+  } else {
+    for (const existingFile of fs.readdirSync(META_DIR)) {
+      if (existingFile.endsWith(".json")) {
+        fs.unlinkSync(path.join(META_DIR, existingFile));
+      }
+    }
+  }
+
+  console.log(`Generating static meta files for ${activeCandidates.length} shows...`);
+  const metas = await mapWithConcurrency(activeCandidates, 6, async (item) => {
     auditLogs.push({
       name: item.showName,
       status: "KEPT",
       episodeDate: item.episodeDate || "-",
       detail: item.audit.reason
     });
+
+    const firstYear = item.tmdbDetails.first_air_date ? item.tmdbDetails.first_air_date.split("-")[0] : "";
+    const latestDateOrYear = item.episodeDate || firstYear || undefined;
+    const videos = await buildSeriesVideos(
+      item.tmdbId,
+      item.stremioId,
+      item.tmdbDetails,
+      item.episodeDate,
+      todayStr
+    );
+
+    const metaObj = {
+      id: item.stremioId,
+      imdb_id: item.imdbId || undefined,
+      tmdb_id: item.tmdbId,
+      type: "series",
+      name: item.showName,
+      genres: item.tmdbMeta.genres,
+      year: firstYear || undefined,
+      releaseInfo: latestDateOrYear,
+      description: item.tmdbDetails.overview || "",
+      poster: item.tmdbDetails.poster_path ? `https://image.tmdb.org/t/p/original${item.tmdbDetails.poster_path}` : null,
+      background: item.tmdbDetails.backdrop_path ? `https://image.tmdb.org/t/p/original${item.tmdbDetails.backdrop_path}` : null,
+      videos
+    };
+
+    const metaFilePath = path.join(META_DIR, `${item.stremioId}.json`);
+    fs.writeFileSync(metaFilePath, JSON.stringify({ meta: metaObj }, null, 2));
 
     return {
       id: item.stremioId,
@@ -458,14 +555,14 @@ async function build() {
       type: "series",
       name: item.showName,
       genres: item.tmdbMeta.genres,
-      year: item.tmdbDetails.first_air_date ? item.tmdbDetails.first_air_date.split("-")[0] : undefined,
+      year: firstYear || undefined,
+      releaseInfo: latestDateOrYear,
       description: item.tmdbDetails.overview || "",
       poster: item.tmdbDetails.poster_path ? `https://image.tmdb.org/t/p/original${item.tmdbDetails.poster_path}` : null,
       background: item.tmdbDetails.backdrop_path ? `https://image.tmdb.org/t/p/original${item.tmdbDetails.backdrop_path}` : null
     };
   });
 
-  if (!fs.existsSync(CATALOG_DIR)) fs.mkdirSync(CATALOG_DIR, { recursive: true });
   const filePath = path.join(CATALOG_DIR, "tvmaze_weekly_schedule.json");
   fs.writeFileSync(filePath, JSON.stringify({ metas }, null, 2));
 
@@ -474,7 +571,7 @@ async function build() {
   console.log("=================================================================================");
   console.table(auditLogs);
   console.log("=================================================================================\n");
-  console.log(`Successfully generated ${metas.length} adult shows in ${((Date.now() - startedAt) / 1000).toFixed(1)}s.`);
+  console.log(`Successfully generated ${metas.length} adult shows and meta files in ${((Date.now() - startedAt) / 1000).toFixed(1)}s.`);
 }
 
 build().catch(err => { console.error(err); process.exit(1); });
