@@ -29,14 +29,14 @@ const EPGUIDES_DELAY_MS = 120;
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const MISS_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
-// Set to a show name (e.g. "Stick") to debug a single show, or "" for full run
+// Set to an exact show title (e.g. "Stick" or "12 12 12") to test one show, or "" for full run
 const DEBUG_ONLY_SHOW = "";
 
 const auditLogs = [];
 const jsonCache = new Map();
 
 function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function isValidYmd(str) {
@@ -131,7 +131,9 @@ function pacificDateString(date = new Date()) {
   }).formatToParts(date);
 
   const map = {};
-  parts.forEach(p => { map[p.type] = p.value; });
+  parts.forEach((p) => {
+    map[p.type] = p.value;
+  });
   return `${map.year}-${map.month}-${map.day}`;
 }
 
@@ -196,7 +198,11 @@ function toEpguidesSlugs(title) {
   for (const v of variants) {
     if (!v) continue;
     const compact = v.replace(/['’]/g, "").replace(/[^a-zA-Z0-9]+/g, "");
-    const dashed = v.toLowerCase().replace(/['’]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+    const dashed = v
+      .toLowerCase()
+      .replace(/['’]/g, "")
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "");
     if (compact) slugs.push(compact);
     if (dashed && dashed.toLowerCase() !== compact.toLowerCase()) slugs.push(dashed);
   }
@@ -207,7 +213,7 @@ function toEpguidesSlugs(title) {
 function pickPrimaryDate(allDatesAsc, cutoffDate, latestSeasonDatesAsc = []) {
   const pool = latestSeasonDatesAsc.length > 0 ? latestSeasonDatesAsc : allDatesAsc;
   if (!Array.isArray(pool) || pool.length === 0) return "";
-  const pastOrToday = [...pool].reverse().find(d => d <= cutoffDate);
+  const pastOrToday = [...pool].reverse().find((d) => d <= cutoffDate);
   if (pastOrToday) return pastOrToday;
   return pool[0];
 }
@@ -257,9 +263,10 @@ function parseEpisodesPayload(payload) {
   }
 
   const allDates = [...allDatesSet].sort((a, b) => a.localeCompare(b));
-  const latestSeasonDatesAsc = highestSeason > 0 && seasonDates.has(highestSeason)
-    ? [...seasonDates.get(highestSeason)].sort((a, b) => a.localeCompare(b))
-    : [];
+  const latestSeasonDatesAsc =
+    highestSeason > 0 && seasonDates.has(highestSeason)
+      ? [...seasonDates.get(highestSeason)].sort((a, b) => a.localeCompare(b))
+      : [];
 
   return { episodeDateMap, allDates, latestSeasonDatesAsc };
 }
@@ -293,7 +300,7 @@ function extractSearchSlugs(searchPayload, showName) {
   }
 
   scored.sort((a, b) => b.score - a.score);
-  return [...new Set(scored.map(s => s.slug))].slice(0, 3);
+  return [...new Set(scored.map((s) => s.slug))].slice(0, 3);
 }
 
 async function fetchEpguidesScheduleData(showName, cutoffDate, persistentCache, forceRefresh = false) {
@@ -303,13 +310,19 @@ async function fetchEpguidesScheduleData(showName, cutoffDate, persistentCache, 
   if (!forceRefresh && isCacheEntryFresh(cached)) {
     const episodeDateMap = new Map(Object.entries(cached.episodes || {}));
     const allDates = Array.isArray(cached.allDates) ? cached.allDates : [];
-    const latestSeasonDatesAsc = Array.isArray(cached.latestSeasonDatesAsc) ? cached.latestSeasonDatesAsc : [];
+    const latestSeasonDatesAsc = Array.isArray(cached.latestSeasonDatesAsc)
+      ? cached.latestSeasonDatesAsc
+      : [];
     const primaryDate = cached.miss
       ? ""
-      : (isValidYmd(cached.primaryDate) ? cached.primaryDate : pickPrimaryDate(allDates, cutoffDate, latestSeasonDatesAsc));
+      : isValidYmd(cached.primaryDate)
+        ? cached.primaryDate
+        : pickPrimaryDate(allDates, cutoffDate, latestSeasonDatesAsc);
 
     if (DEBUG_ONLY_SHOW) {
-      console.log(`[CACHE HIT] "${showName}" -> primaryDate=${primaryDate || "-"} episodes=${episodeDateMap.size}`);
+      console.log(
+        `[CACHE HIT] "${showName}" -> primaryDate=${primaryDate || "-"} episodes=${episodeDateMap.size}`
+      );
     }
     return { primaryDate, allDates, episodeDateMap, fromCache: true };
   }
@@ -399,17 +412,22 @@ async function getTmdbMetadata(tmdbId, country = "US") {
 
   if (!details) return null;
 
-  const ratingObj = ratingsData?.results?.find(r => r.iso_3166_1 === country) || ratingsData?.results?.[0];
+  const ratingObj =
+    ratingsData?.results?.find((r) => r.iso_3166_1 === country) || ratingsData?.results?.[0];
   const kwList = keywordsData?.results || keywordsData?.keywords || [];
 
   return {
     details,
     certification: ratingObj ? ratingObj.rating : null,
     imdbId: externalIds?.imdb_id || null,
-    genres: Array.isArray(details.genres) ? details.genres.map(g => g?.name).filter(Boolean) : [],
-    keywords: Array.isArray(kwList) ? kwList.map(k => k?.name).filter(Boolean) : [],
+    genres: Array.isArray(details.genres)
+      ? details.genres.map((g) => g?.name).filter(Boolean)
+      : [],
+    keywords: Array.isArray(kwList) ? kwList.map((k) => k?.name).filter(Boolean) : [],
     originalLanguage: details.original_language,
-    networks: Array.isArray(details.networks) ? details.networks.map(n => n?.name).filter(Boolean) : [],
+    networks: Array.isArray(details.networks)
+      ? details.networks.map((n) => n?.name).filter(Boolean)
+      : [],
     voteAverage: details.vote_average ?? null,
     voteCount: details.vote_count ?? 0
   };
@@ -421,13 +439,15 @@ async function getTmdbMetadata(tmdbId, country = "US") {
 async function buildSeriesVideos(tmdbId, stremioId, tmdbDetails, scheduleData) {
   const seasons = Array.isArray(tmdbDetails.seasons)
     ? tmdbDetails.seasons
-        .filter(s => typeof s.season_number === "number" && s.season_number > 0)
+        .filter((s) => typeof s.season_number === "number" && s.season_number > 0)
         .sort((a, b) => a.season_number - b.season_number)
     : [];
 
   const seasonPayloads = await Promise.all(
-    seasons.map(s =>
-      fetchJSON(`https://api.themoviedb.org/3/tv/${tmdbId}/season/${s.season_number}?api_key=${TMDB_API_KEY}`)
+    seasons.map((s) =>
+      fetchJSON(
+        `https://api.themoviedb.org/3/tv/${tmdbId}/season/${s.season_number}?api_key=${TMDB_API_KEY}`
+      )
     )
   );
 
@@ -473,31 +493,38 @@ function evaluateExclusion(tmdbId, showName, tmdbMeta) {
 
   if (
     whitelistedIds.includes(Number(tmdbId)) ||
-    whitelistedTitles.some(title => name === title || name.includes(title))
+    whitelistedTitles.some((title) => name === title || name.includes(title))
   ) {
     return { exclude: false, reason: "Whitelisted Override", whitelisted: true };
   }
 
-  if (tmdbMeta.voteCount === 0 || (tmdbMeta.voteAverage !== null && tmdbMeta.voteAverage < 0.5)) {
-    return { exclude: true, reason: `Excluded: Unrated or rating below 5% (Votes: ${tmdbMeta.voteCount})`, whitelisted: false };
+  if (
+    tmdbMeta.voteCount === 0 ||
+    (tmdbMeta.voteAverage !== null && tmdbMeta.voteAverage < 0.5)
+  ) {
+    return {
+      exclude: true,
+      reason: `Excluded: Unrated or rating below 5% (Votes: ${tmdbMeta.voteCount})`,
+      whitelisted: false
+    };
   }
 
   const genres = (tmdbMeta.genres || [])
-    .map(g => (typeof g === "string" ? g : g?.name || ""))
+    .map((g) => (typeof g === "string" ? g : g?.name || ""))
     .filter(Boolean)
-    .map(g => g.toLowerCase());
+    .map((g) => g.toLowerCase());
 
   const lang = (tmdbMeta.originalLanguage || "").toLowerCase();
 
   const networks = (tmdbMeta.networks || [])
-    .map(n => (typeof n === "string" ? n : n?.name || ""))
+    .map((n) => (typeof n === "string" ? n : n?.name || ""))
     .filter(Boolean)
-    .map(n => n.toLowerCase());
+    .map((n) => n.toLowerCase());
 
   const keywords = (tmdbMeta.keywords || [])
-    .map(k => (typeof k === "string" ? k : k?.name || ""))
+    .map((k) => (typeof k === "string" ? k : k?.name || ""))
     .filter(Boolean)
-    .map(k => k.toLowerCase());
+    .map((k) => k.toLowerCase());
 
   const lowerOverview = (tmdbMeta.details.overview || "").toLowerCase();
 
@@ -507,81 +534,52 @@ function evaluateExclusion(tmdbId, showName, tmdbMeta) {
 
   const nonEnglishCharRegex = /[\u4e00-\u9fa5\u3040-\u30ff\u3130-\u318f\u0400-\u04ff]/;
   if (nonEnglishCharRegex.test(showName)) {
-    return { exclude: true, reason: `Excluded: Contains foreign script (${showName})`, whitelisted: false };
+    return {
+      exclude: true,
+      reason: `Excluded: Contains foreign script (${showName})`,
+      whitelisted: false
+    };
   }
 
   const blockedNetworks = [
-    "iqiyi", "bilibili", "wavve", "youku", "tencent qq", "vivaone",
-    "premier", "смотрим", "кион", "geo entertainment", "tokyo mx"
+    "iqiyi",
+    "bilibili",
+    "wavve",
+    "youku",
+    "tencent qq",
+    "vivaone",
+    "premier",
+    "смотрим",
+    "кион",
+    "geo entertainment",
+    "tokyo mx"
   ];
-  if (networks.some(net => blockedNetworks.some(b => net.includes(b)))) {
-    return { exclude: true, reason: `Excluded: Blocked Network (${networks.join(", ")})`, whitelisted: false };
+  if (networks.some((net) => blockedNetworks.some((b) => net.includes(b)))) {
+    return {
+      exclude: true,
+      reason: `Excluded: Blocked Network (${networks.join(", ")})`,
+      whitelisted: false
+    };
   }
 
   const wrestlingTerms = [
-    "wwe", "aew", "njpw", "impact wrestling", "ring of honor", "smackdown",
-    "wrestlemania", "royal rumble", "professional wrestling", "pro wrestling"
+    "wwe",
+    "aew",
+    "njpw",
+    "impact wrestling",
+    "ring of honor",
+    "smackdown",
+    "wrestlemania",
+    "royal rumble",
+    "professional wrestling",
+    "pro wrestling"
   ];
   if (
-    wrestlingTerms.some(term => name.includes(term)) ||
-    keywords.some(k => k.includes("wrestling")) ||
-    (lowerOverview.includes("wrestling") && (lowerOverview.includes("ring") || lowerOverview.includes("championship")))
+    wrestlingTerms.some((term) => name.includes(term)) ||
+    keywords.some((k) => k.includes("wrestling")) ||
+    (lowerOverview.includes("wrestling") &&
+      (lowerOverview.includes("ring") || lowerOverview.includes("championship")))
   ) {
-    return { exclude: true, reason: `Excluded: Professional Wrestling (${showName})`, whitelisted: false };
-  }
-
-  if (
-    name.includes("san pito pato") ||
-    name.includes("dragon baby") ||
-    name.includes("mayday for my devil") ||
-    lowerOverview.includes("vertical drama") ||
-    lowerOverview.includes("short drama") ||
-    (name.includes("devil") && lowerOverview.includes("billionaire"))
-  ) {
-    return { exclude: true, reason: "Excluded: Vertical short-drama / micro-series pattern", whitelisted: false };
-  }
-
-  const allowedGenres = ["panel", "quiz", "game show", "game-show", "reality", "home improvement", "renovation"];
-  if (
-    genres.some(g => allowedGenres.some(a => g.includes(a))) ||
-    name.includes("zombie") ||
-    name.includes("beach")
-  ) {
-    return { exclude: false, reason: "Allowed Reality/Renovation Content", whitelisted: false };
-  }
-
-  if (genres.some(g => g.includes("sports"))) {
-    return { exclude: true, reason: "Excluded: Sports", whitelisted: false };
-  }
-  if (genres.some(g => g.includes("news") || g.includes("talk"))) {
-    return { exclude: true, reason: "Excluded: News/Talk", whitelisted: false };
-  }
-  if (genres.some(g => g === "documentary")) {
-    return { exclude: true, reason: "Excluded: Pure Documentary", whitelisted: false };
-  }
-
-  return { exclude: false, reason: "Passed general rules", whitelisted: false };
-}
-
-function writeMetaFiles(stremioId, metaObj) {
-  const payload = JSON.stringify({ meta: metaObj }, null, 2);
-  const rawPath = path.join(META_DIR, `${stremioId}.json`);
-  const encodedPath = path.join(META_DIR, `${encodeURIComponent(stremioId)}.json`);
-
-  fs.writeFileSync(rawPath, payload);
-  if (encodedPath !== rawPath) {
-    fs.writeFileSync(encodedPath, payload);
-  }
-}
-
-async function build() {
-  const startedAt = Date.now();
-  const discoveredIds = new Set();
-  const todayStr = pacificDateString();
-  const persistentCache = loadPersistentDateCache();
-
-  if (DEBUG_ONLY_SHOW) {
-    const data = await fetchEpguidesScheduleData(DEBUG_ONLY_SHOW, todayStr, persistentCache, true);
-    savePersistentDateCache(persistentCache);
-    console.log("[DEBUG RESULT] primaryDate:", data.primaryDate, "mapSize:", data.episodeDateMap.size);
-    console.
+    return {
+      exclude: true,
+      reason:
