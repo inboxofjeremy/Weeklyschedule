@@ -1,7 +1,7 @@
 /**
  * build.js — Stremio & Wako compatible static catalog + meta generator
- * TMDB Daily Discover + Next-Episode.net dates
- * All dates come strictly from next-episode.net (zero TMDB air_date usage).
+ * TMDB Daily Discover + epguides.frecar.no dates with persistent JSON cache
+ * All episode dates come strictly from epguides.frecar.no (zero TMDB air_date usage).
  */
 
 import fs from "fs";
@@ -18,31 +18,22 @@ if (!TMDB_API_KEY || TMDB_API_KEY.trim() === "") {
 
 const CATALOG_DIR = path.join(__dirname, "catalog", "series");
 const META_DIR = path.join(__dirname, "meta", "series");
+const CACHE_DIR = path.join(__dirname, "cache");
+const DATE_CACHE_FILE = path.join(CACHE_DIR, "epguides-airdates.json");
+
+const EPGUIDES_BASE = "https://epguides.frecar.no";
 const LOOKAHEAD_DAYS = 3;
 const RETENTION_DAYS_BACK = 9;
-const NEXT_EPISODE_CONCURRENCY = 3;
-const NEXT_EPISODE_DELAY_MS = 200;
+const EPGUIDES_CONCURRENCY = 4;
+const EPGUIDES_DELAY_MS = 120;
+const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const MISS_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
-//Set to a show name (e.g. "Stick") to debug a single show, or "" for full run
-const DEBUG_ONLY_SHOW = "12 12 12";
+// Set to a show name (e.g. "Stick") to debug a single show, or "" for full run
+const DEBUG_ONLY_SHOW = "";
 
 const auditLogs = [];
-const htmlCache = new Map();
-
-const MONTHS = {
-  jan: "01",
-  feb: "02",
-  mar: "03",
-  apr: "04",
-  may: "05",
-  jun: "06",
-  jul: "07",
-  aug: "08",
-  sep: "09",
-  oct: "10",
-  nov: "11",
-  dec: "12"
-};
+const jsonCache = new Map();
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -52,22 +43,24 @@ function isValidYmd(str) {
   return typeof str === "string" && /^\d{4}-\d{2}-\d{2}$/.test(str);
 }
 
-async function fetchJSON(url, timeoutMs = 7000) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res = await fetch(url, { signal: controller.signal });
-    return res.ok ? await res.json() : null;
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timer);
+function normalizeDateYmd(rawVal) {
+  if (!rawVal) return null;
+  const s = String(rawVal).trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+
+  const isoPrefix = s.match(/^(\d{4}-\d{2}-\d{2})[T\s]/);
+  if (isoPrefix) return isoPrefix[1];
+
+  const dt = new Date(s);
+  if (!Number.isNaN(dt.getTime())) {
+    return dt.toISOString().slice(0, 10);
   }
+  return null;
 }
 
-async function fetchNextEpisodeHTML(url, timeoutMs = 6000, retries = 1) {
-  if (htmlCache.has(url)) {
-    return htmlCache.get(url);
+async function fetchJSON(url, timeoutMs = 7000, retries = 1) {
+  if (jsonCache.has(url)) {
+    return jsonCache.get(url);
   }
 
   for (let attempt = 0; attempt <= retries; attempt++) {
@@ -76,50 +69,40 @@ async function fetchNextEpisodeHTML(url, timeoutMs = 6000, retries = 1) {
     try {
       const res = await fetch(url, {
         signal: controller.signal,
-        redirect: "follow",
-        headers: {
-          "User-Agent":
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-          "Accept-Language": "en-US,en;q=0.9",
-          "Referer": "https://next-episode.net/"
-        }
+        headers: { Accept: "application/json" }
       });
 
       if (res.status === 404) {
-        htmlCache.set(url, null);
+        jsonCache.set(url, null);
         return null;
       }
 
-      const text = await res.text();
-      if (DEBUG_ONLY_SHOW) {
-        console.log(`[FETCH] ${url} -> status=${res.status} bytes=${text.length}`);
-      }
-
-      if ((res.status === 429 || res.status === 503) && attempt < retries) {
-        await sleep(800 * (attempt + 1));
+      if ((res.status === 429 || res.status >= 500) && attempt < retries) {
+        await sleep(600 * (attempt + 1));
         continue;
       }
 
-      const result = res.ok ? text : null;
-      htmlCache.set(url, result);
-      return result;
-    } catch (err) {
-      if (DEBUG_ONLY_SHOW) {
-        console.log(`[FETCH ERR] ${url} -> ${err?.message || String(err)}`);
+      if (!res.ok) {
+        jsonCache.set(url, null);
+        return null;
       }
+
+      const data = await res.json();
+      jsonCache.set(url, data);
+      return data;
+    } catch {
       if (attempt < retries) {
         await sleep(400 * (attempt + 1));
         continue;
       }
-      htmlCache.set(url, null);
+      jsonCache.set(url, null);
       return null;
     } finally {
       clearTimeout(timer);
     }
   }
 
-  htmlCache.set(url, null);
+  jsonCache.set(url, null);
   return null;
 }
 
@@ -166,264 +149,242 @@ function toIsoMidnight(dateStr) {
   return `${dateStr}T00:00:00.000Z`;
 }
 
-function normalizeTitleTokens(str) {
+function loadPersistentDateCache() {
+  try {
+    if (!fs.existsSync(DATE_CACHE_FILE)) return {};
+    const raw = fs.readFileSync(DATE_CACHE_FILE, "utf8");
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function savePersistentDateCache(cacheObj) {
+  if (!fs.existsSync(CACHE_DIR)) {
+    fs.mkdirSync(CACHE_DIR, { recursive: true });
+  }
+  fs.writeFileSync(DATE_CACHE_FILE, JSON.stringify(cacheObj, null, 2));
+}
+
+function isCacheEntryFresh(entry, nowMs = Date.now()) {
+  if (!entry || typeof entry.fetchedAt !== "number") return false;
+  const age = nowMs - entry.fetchedAt;
+  if (entry.miss) return age < MISS_TTL_MS;
+  return age < CACHE_TTL_MS;
+}
+
+function normalizeTitle(str) {
   return (str || "")
     .toLowerCase()
     .replace(/['’]/g, "")
     .replace(/[^a-z0-9]+/g, " ")
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean);
+    .trim();
 }
 
-function toNextEpisodeSlugs(title) {
-  const raw = (title || "").toLowerCase().trim();
+function toEpguidesSlugs(title) {
+  const raw = (title || "").trim();
   if (!raw) return [];
 
-  const variants = [
-    raw,
-    raw.replace(/\s*\([^)]*\)\s*/g, " "),
-    raw.replace(/^(the|a|an)\s+/i, ""),
-    raw.replace(/\s*\([^)]*\)\s*/g, " ").replace(/^(the|a|an)\s+/i, "")
-  ];
+  const noParens = raw.replace(/\s*\([^)]*\)\s*/g, " ").trim();
+  const noLeadingArticle = raw.replace(/^(the|a|an)\s+/i, "").trim();
+  const cleanCombo = noParens.replace(/^(the|a|an)\s+/i, "").trim();
 
+  const variants = [raw, noParens, noLeadingArticle, cleanCombo];
   const slugs = [];
+
   for (const v of variants) {
-    const cleaned = v
-      .replace(/['’]/g, "")
-      .replace(/&/g, "and")
-      .trim();
-    const dashed = cleaned.replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
-    const compact = cleaned.replace(/[^a-z0-9]+/g, "");
-    if (dashed) slugs.push(dashed);
+    if (!v) continue;
+    const compact = v.replace(/['’]/g, "").replace(/[^a-zA-Z0-9]+/g, "");
+    const dashed = v.toLowerCase().replace(/['’]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
     if (compact) slugs.push(compact);
+    if (dashed && dashed.toLowerCase() !== compact.toLowerCase()) slugs.push(dashed);
   }
 
   return [...new Set(slugs)];
 }
 
-function parseNextEpisodeDateText(rawDateText) {
-  if (!rawDateText) return null;
-  const match = rawDateText.match(/\b(?:[A-Za-z]{3}\s+)?([A-Za-z]{3})\s+(\d{1,2}),\s+(\d{4})\b/);
-  if (!match) return null;
-
-  const monthNum = MONTHS[match[1].toLowerCase()];
-  if (!monthNum) return null;
-
-  const day = match[2].padStart(2, "0");
-  const year = match[3];
-  const ymd = `${year}-${monthNum}-${day}`;
-  return isValidYmd(ymd) ? ymd : null;
-}
-
-function stripTags(str) {
-  return str
-    .replace(/<script[\s\S]*?<\/script>/gi, " ")
-    .replace(/<style[\s\S]*?<\/style>/gi, " ")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&nbsp;/gi, " ")
-    .replace(/&#?\w+;/gi, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function scoreCandidateMatch(showName, candidateSlug, anchorText = "") {
-  const showTokens = normalizeTitleTokens(showName);
-  if (showTokens.length === 0) return 0;
-
-  const combinedTokens = new Set([
-    ...normalizeTitleTokens(candidateSlug.replace(/-/g, " ")),
-    ...normalizeTitleTokens(anchorText)
-  ]);
-
-  let hits = 0;
-  for (const tok of showTokens) {
-    if (combinedTokens.has(tok)) hits++;
-  }
-
-  const exactSlugMatch = toNextEpisodeSlugs(showName).includes(candidateSlug.toLowerCase()) ? 2 : 0;
-  return hits / showTokens.length + exactSlugMatch;
-}
-
-function isRealShowPage(html, info) {
-  if (!html) return false;
-  if (info.allDates.length > 0 || info.seasonNumbers.length > 0) return true;
-  return /\bEpisodes\s+Guide\b/i.test(html) || /\bAir\s+Date\b/i.test(html);
-}
-
-/**
- * Parses a /<slug>/season-<N> page into { seasonNumber, episodes: Map<episodeNum, ymd> }
- */
-function parseSeasonTableHtml(html, fallbackSeasonNumber = 1) {
-  const result = new Map();
-  const seasonNumber = Number(fallbackSeasonNumber) > 0 ? Number(fallbackSeasonNumber) : 1;
-  if (!html) return { seasonNumber, episodes: result };
-
-  const trMatches = [...html.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/gi)];
-  for (const tr of trMatches) {
-    const rowHtml = tr[1];
-    const cells = [...rowHtml.matchAll(/<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi)].map(c => stripTags(c[1]));
-    if (cells.length < 2) continue;
-
-    const epNum = Number(cells[0].match(/^\d{1,3}$/)?.[0] || "");
-    if (epNum <= 0) continue;
-
-    for (let c = cells.length - 1; c >= 1; c--) {
-      const airDateYmd = parseNextEpisodeDateText(cells[c]);
-      if (isValidYmd(airDateYmd)) {
-        result.set(epNum, airDateYmd);
-        break;
-      }
-    }
-  }
-
-  return { seasonNumber, episodes: result };
-}
-
-function parseShowPageInfo(html) {
-  if (!html) return { allDates: [], seasonNumbers: [] };
-
-  const plainText = stripTags(html);
-  const dateMatches = [
-    ...plainText.matchAll(/\b(?:[A-Za-z]{3}\s+)?([A-Za-z]{3})\s+(\d{1,2}),\s+(\d{4})\b/g)
-  ];
-
-  const allDates = [
-    ...new Set(
-      dateMatches
-        .map(m => parseNextEpisodeDateText(m[0]))
-        .filter(isValidYmd)
-    )
-  ].sort((a, b) => a.localeCompare(b));
-
-  const seasonLinks = [...html.matchAll(/\/season-(\d{1,2})\b/gi)].map(m => Number(m[1]));
-  const seasonNumbers = [...new Set(seasonLinks)].filter(n => n > 0).sort((a, b) => a - b);
-
-  return { allDates, seasonNumbers };
-}
-
-/**
- * Picks the most recent date <= cutoffDate (or earliest upcoming date if all are in the future).
- * When season dates are available, prefers dates from the highest season scraped so old seasons
- * on long-running shows don't override current dates.
- */
-function pickPrimaryDate(datesAsc, cutoffDate, latestSeasonDatesAsc = []) {
-  const pool = latestSeasonDatesAsc.length > 0 ? latestSeasonDatesAsc : datesAsc;
+function pickPrimaryDate(allDatesAsc, cutoffDate, latestSeasonDatesAsc = []) {
+  const pool = latestSeasonDatesAsc.length > 0 ? latestSeasonDatesAsc : allDatesAsc;
   if (!Array.isArray(pool) || pool.length === 0) return "";
   const pastOrToday = [...pool].reverse().find(d => d <= cutoffDate);
   if (pastOrToday) return pastOrToday;
   return pool[0];
 }
 
-async function getNextEpisodeScheduleData(showName, cutoffDate, maxSeasonHint = 1) {
-  const slugs = toNextEpisodeSlugs(showName);
+function parseEpisodesPayload(payload) {
   const episodeDateMap = new Map();
-  let allDates = [];
-  let latestSeasonDatesAsc = [];
+  let highestSeason = 0;
+  const seasonDates = new Map();
+  const allDatesSet = new Set();
 
-  let matchedSlug = "";
-  let discoveredSeasons = [];
+  if (!payload || typeof payload !== "object") {
+    return { episodeDateMap, allDates: [], latestSeasonDatesAsc: [] };
+  }
+
+  const rawList = Array.isArray(payload)
+    ? payload
+    : Array.isArray(payload.episodes)
+      ? payload.episodes
+      : payload.episodes && typeof payload.episodes === "object"
+        ? Object.values(payload.episodes).flat()
+        : Array.isArray(payload.data)
+          ? payload.data
+          : [];
+
+  for (const item of rawList) {
+    if (!item || typeof item !== "object") continue;
+
+    const season = Number(
+      item.season ?? item.season_number ?? item.seasonNumber ?? item.s ?? 0
+    );
+    const episode = Number(
+      item.episode ?? item.episode_number ?? item.episodeNumber ?? item.number ?? item.e ?? 0
+    );
+    const rawDate =
+      item.airdate ?? item.air_date ?? item.release_date ?? item.releaseDate ?? item.date ?? null;
+    const ymd = normalizeDateYmd(rawDate);
+
+    if (!isValidYmd(ymd)) continue;
+    allDatesSet.add(ymd);
+
+    if (season > 0 && episode > 0) {
+      episodeDateMap.set(`${season}:${episode}`, ymd);
+      if (season > highestSeason) highestSeason = season;
+      if (!seasonDates.has(season)) seasonDates.set(season, new Set());
+      seasonDates.get(season).add(ymd);
+    }
+  }
+
+  const allDates = [...allDatesSet].sort((a, b) => a.localeCompare(b));
+  const latestSeasonDatesAsc = highestSeason > 0 && seasonDates.has(highestSeason)
+    ? [...seasonDates.get(highestSeason)].sort((a, b) => a.localeCompare(b))
+    : [];
+
+  return { episodeDateMap, allDates, latestSeasonDatesAsc };
+}
+
+function extractSearchSlugs(searchPayload, showName) {
+  if (!searchPayload) return [];
+  const list = Array.isArray(searchPayload)
+    ? searchPayload
+    : Array.isArray(searchPayload.results)
+      ? searchPayload.results
+      : Array.isArray(searchPayload.shows)
+        ? searchPayload.shows
+        : [];
+
+  const targetNorm = normalizeTitle(showName);
+  const scored = [];
+
+  for (const entry of list) {
+    if (!entry || typeof entry !== "object") continue;
+    const slug = entry.slug || entry.show?.slug || entry.id || entry.code || "";
+    const title = entry.title || entry.name || entry.show?.title || entry.show?.name || "";
+    if (!slug) continue;
+
+    const titleNorm = normalizeTitle(title);
+    let score = 1;
+    if (titleNorm && targetNorm) {
+      if (titleNorm === targetNorm) score += 5;
+      else if (titleNorm.includes(targetNorm) || targetNorm.includes(titleNorm)) score += 2;
+    }
+    scored.push({ slug: String(slug), score });
+  }
+
+  scored.sort((a, b) => b.score - a.score);
+  return [...new Set(scored.map(s => s.slug))].slice(0, 3);
+}
+
+async function fetchEpguidesScheduleData(showName, cutoffDate, persistentCache, forceRefresh = false) {
+  const cacheKey = normalizeTitle(showName) || showName.toLowerCase();
+  const cached = persistentCache[cacheKey];
+
+  if (!forceRefresh && isCacheEntryFresh(cached)) {
+    const episodeDateMap = new Map(Object.entries(cached.episodes || {}));
+    const allDates = Array.isArray(cached.allDates) ? cached.allDates : [];
+    const latestSeasonDatesAsc = Array.isArray(cached.latestSeasonDatesAsc) ? cached.latestSeasonDatesAsc : [];
+    const primaryDate = cached.miss
+      ? ""
+      : (isValidYmd(cached.primaryDate) ? cached.primaryDate : pickPrimaryDate(allDates, cutoffDate, latestSeasonDatesAsc));
+
+    if (DEBUG_ONLY_SHOW) {
+      console.log(`[CACHE HIT] "${showName}" -> primaryDate=${primaryDate || "-"} episodes=${episodeDateMap.size}`);
+    }
+    return { primaryDate, allDates, episodeDateMap, fromCache: true };
+  }
+
+  const slugs = toEpguidesSlugs(showName);
+  let resolved = null;
 
   for (const slug of slugs) {
-    await sleep(NEXT_EPISODE_DELAY_MS);
-    const showHtml = await fetchNextEpisodeHTML(`https://next-episode.net/${slug}`);
-    if (!showHtml) continue;
-
-    const info = parseShowPageInfo(showHtml);
-    if (isRealShowPage(showHtml, info)) {
-      matchedSlug = slug;
-      allDates = [...info.allDates];
-      discoveredSeasons = info.seasonNumbers;
+    await sleep(EPGUIDES_DELAY_MS);
+    const url = `${EPGUIDES_BASE}/shows/${encodeURIComponent(slug)}/episodes`;
+    if (DEBUG_ONLY_SHOW) console.log(`[EPGUIDES TRY] ${url}`);
+    const payload = await fetchJSON(url);
+    const parsed = parseEpisodesPayload(payload);
+    if (parsed.episodeDateMap.size > 0 || parsed.allDates.length > 0) {
+      resolved = parsed;
       break;
     }
   }
 
-  if (!matchedSlug) {
-    const ignoredPaths = new Set([
-      "browse", "calendar", "login", "register", "search", "news",
-      "trailers", "top", "popular", "recent", "privacy", "terms", "contact", "faq", "premium", "shows"
-    ]);
+  if (!resolved) {
+    await sleep(EPGUIDES_DELAY_MS);
+    const searchUrl = `${EPGUIDES_BASE}/shows/search?query=${encodeURIComponent(showName)}`;
+    if (DEBUG_ONLY_SHOW) console.log(`[EPGUIDES SEARCH] ${searchUrl}`);
+    const searchData = await fetchJSON(searchUrl);
+    const candidateSlugs = extractSearchSlugs(searchData, showName);
 
-    await sleep(NEXT_EPISODE_DELAY_MS);
-    const searchUrl = `https://next-episode.net/search/?name=${encodeURIComponent(showName)}`;
-    const searchHtml = await fetchNextEpisodeHTML(searchUrl);
-    if (searchHtml) {
-      const scoredCandidates = [];
-      for (const aMatch of searchHtml.matchAll(/<a[^>]+href=["']\/([a-z0-9-]+)(?:\/[^"']*)?["'][^>]*>([\s\S]*?)<\/a>/gi)) {
-        const candidateSlug = aMatch[1].toLowerCase();
-        if (ignoredPaths.has(candidateSlug) || candidateSlug.startsWith("season-")) continue;
-        const anchorText = stripTags(aMatch[2]);
-        const score = scoreCandidateMatch(showName, candidateSlug, anchorText);
-        if (score > 0) {
-          scoredCandidates.push({ slug: candidateSlug, score });
-        }
-      }
-
-      scoredCandidates.sort((a, b) => b.score - a.score);
-      const uniqueCandidates = [...new Map(scoredCandidates.map(c => [c.slug, c])).values()].slice(0, 2);
-
-      for (const cand of uniqueCandidates) {
-        await sleep(NEXT_EPISODE_DELAY_MS);
-        const candidateHtml = await fetchNextEpisodeHTML(`https://next-episode.net/${cand.slug}`);
-        if (!candidateHtml) continue;
-        const info = parseShowPageInfo(candidateHtml);
-        if (isRealShowPage(candidateHtml, info)) {
-          matchedSlug = cand.slug;
-          allDates = [...info.allDates];
-          discoveredSeasons = info.seasonNumbers;
-          break;
-        }
+    for (const candSlug of candidateSlugs) {
+      if (slugs.includes(candSlug)) continue;
+      await sleep(EPGUIDES_DELAY_MS);
+      const url = `${EPGUIDES_BASE}/shows/${encodeURIComponent(candSlug)}/episodes`;
+      if (DEBUG_ONLY_SHOW) console.log(`[EPGUIDES CAND] ${url}`);
+      const payload = await fetchJSON(url);
+      const parsed = parseEpisodesPayload(payload);
+      if (parsed.episodeDateMap.size > 0 || parsed.allDates.length > 0) {
+        resolved = parsed;
+        break;
       }
     }
   }
 
-  if (matchedSlug) {
-    const hasExplicitLinks = discoveredSeasons.length > 0;
-    const highestSeason = Math.max(
-      maxSeasonHint || 1,
-      hasExplicitLinks ? Math.max(...discoveredSeasons) : 1
-    );
-    const seasonsToFetch = hasExplicitLinks
-      ? discoveredSeasons
-      : Array.from({ length: Math.min(highestSeason, 30) }, (_, idx) => idx + 1);
-
-    const seasonDatesSet = new Set();
-    let consecutiveEmptyAfterSeason1 = 0;
-
-    for (const sNum of seasonsToFetch) {
-      await sleep(NEXT_EPISODE_DELAY_MS);
-      const seasonHtml = await fetchNextEpisodeHTML(`https://next-episode.net/${matchedSlug}/season-${sNum}`);
-      const parsedSeason = parseSeasonTableHtml(seasonHtml, sNum);
-
-      if (parsedSeason.episodes.size === 0) {
-        if (!hasExplicitLinks && sNum > 1) {
-          consecutiveEmptyAfterSeason1++;
-          if (consecutiveEmptyAfterSeason1 >= 2) break;
-        }
-        continue;
-      }
-
-      consecutiveEmptyAfterSeason1 = 0;
-      const currentSeasonDates = new Set();
-      for (const [epNum, ymd] of parsedSeason.episodes.entries()) {
-        episodeDateMap.set(`${parsedSeason.seasonNumber}:${epNum}`, ymd);
-        seasonDatesSet.add(ymd);
-        currentSeasonDates.add(ymd);
-      }
-      if (currentSeasonDates.size > 0) {
-        latestSeasonDatesAsc = [...currentSeasonDates].sort((a, b) => a.localeCompare(b));
-      }
-    }
-
-    if (seasonDatesSet.size > 0) {
-      allDates = [...seasonDatesSet].sort((a, b) => a.localeCompare(b));
-    } else {
-      allDates = [...new Set(allDates)].sort((a, b) => a.localeCompare(b));
-    }
+  if (!resolved) {
+    persistentCache[cacheKey] = {
+      showName,
+      miss: true,
+      primaryDate: "",
+      allDates: [],
+      latestSeasonDatesAsc: [],
+      episodes: {},
+      fetchedAt: Date.now()
+    };
+    return { primaryDate: "", allDates: [], episodeDateMap: new Map(), fromCache: false };
   }
 
-  const primaryDate = pickPrimaryDate(allDates, cutoffDate, latestSeasonDatesAsc);
-  return { primaryDate, allDates, episodeDateMap };
+  const primaryDate = pickPrimaryDate(resolved.allDates, cutoffDate, resolved.latestSeasonDatesAsc);
+  const episodesObj = {};
+  for (const [k, v] of resolved.episodeDateMap.entries()) {
+    episodesObj[k] = v;
+  }
+
+  persistentCache[cacheKey] = {
+    showName,
+    miss: false,
+    primaryDate,
+    allDates: resolved.allDates,
+    latestSeasonDatesAsc: resolved.latestSeasonDatesAsc,
+    episodes: episodesObj,
+    fetchedAt: Date.now()
+  };
+
+  return {
+    primaryDate,
+    allDates: resolved.allDates,
+    episodeDateMap: resolved.episodeDateMap,
+    fromCache: false
+  };
 }
 
 async function getTmdbMetadata(tmdbId, country = "US") {
@@ -455,9 +416,9 @@ async function getTmdbMetadata(tmdbId, country = "US") {
 }
 
 /**
- * Builds Stremio videos using next-episode.net episodeDateMap.
+ * Builds Stremio videos using epguides.frecar.no episodeDateMap.
  */
-async function buildSeriesVideos(tmdbId, stremioId, tmdbDetails, nextEpisodeData) {
+async function buildSeriesVideos(tmdbId, stremioId, tmdbDetails, scheduleData) {
   const seasons = Array.isArray(tmdbDetails.seasons)
     ? tmdbDetails.seasons
         .filter(s => typeof s.season_number === "number" && s.season_number > 0)
@@ -470,8 +431,8 @@ async function buildSeriesVideos(tmdbId, stremioId, tmdbDetails, nextEpisodeData
     )
   );
 
-  const episodeDateMap = nextEpisodeData?.episodeDateMap || new Map();
-  const fallbackDate = isValidYmd(nextEpisodeData?.primaryDate) ? nextEpisodeData.primaryDate : "";
+  const episodeDateMap = scheduleData?.episodeDateMap || new Map();
+  const fallbackDate = isValidYmd(scheduleData?.primaryDate) ? scheduleData.primaryDate : "";
 
   const videos = [];
   for (const seasonData of seasonPayloads) {
@@ -617,184 +578,10 @@ async function build() {
   const startedAt = Date.now();
   const discoveredIds = new Set();
   const todayStr = pacificDateString();
+  const persistentCache = loadPersistentDateCache();
 
   if (DEBUG_ONLY_SHOW) {
-    const searchJson = await fetchJSON(
-      `https://api.themoviedb.org/3/search/tv?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(DEBUG_ONLY_SHOW)}`
-    );
-    const firstId = searchJson?.results?.[0]?.id;
-    console.log(`[DEBUG MODE] Show="${DEBUG_ONLY_SHOW}" -> TMDB id=${firstId}`);
-    if (firstId) {
-      const meta = await getTmdbMetadata(firstId);
-      const maxSeasonHint = Array.isArray(meta?.details?.seasons)
-        ? Math.max(1, ...meta.details.seasons.map(s => Number(s.season_number) || 0))
-        : 1;
-      const neData = await getNextEpisodeScheduleData(meta.details.name, todayStr, maxSeasonHint);
-      console.log("[DEBUG RESULT] primaryDate:", neData.primaryDate, "mapSize:", neData.episodeDateMap.size);
-      console.log("[DEBUG RESULT] sample map:", [...neData.episodeDateMap.entries()].slice(-10));
-    }
-    return;
-  }
-
-  console.log(`Discovering English shows from TMDB (${LOOKAHEAD_DAYS}-day lookahead + ${RETENTION_DAYS_BACK}-day window)...`);
-
-  const targetDates = [];
-  for (let offset = -RETENTION_DAYS_BACK; offset <= LOOKAHEAD_DAYS; offset++) {
-    targetDates.push(addDaysYmd(todayStr, offset));
-  }
-
-  await mapWithConcurrency(targetDates, 6, async (dateStr) => {
-    let page = 1;
-    let totalPages = 1;
-
-    do {
-      const discoverUrl = `https://api.themoviedb.org/3/discover/tv?api_key=${TMDB_API_KEY}&air_date.gte=${dateStr}&air_date.lte=${dateStr}&with_original_language=en&sort_by=popularity.desc&page=${page}`;
-      const data = await fetchJSON(discoverUrl, 6000);
-
-      if (data?.results) {
-        totalPages = Math.min(data.total_pages || 1, 10);
-        for (const show of data.results) {
-          discoveredIds.add(show.id);
-        }
-      }
-      page++;
-    } while (page <= totalPages);
-  });
-
-  const candidates = Array.from(discoveredIds);
-  console.log(`Discovered ${candidates.length} unique candidate shows in ${((Date.now() - startedAt) / 1000).toFixed(1)}s. Evaluating metadata...`);
-
-  const filteredCandidates = [];
-  await mapWithConcurrency(candidates, 6, async (tmdbId, idx) => {
-    if ((idx + 1) % 50 === 0 || idx + 1 === candidates.length) {
-      console.log(`TMDB metadata progress: ${idx + 1}/${candidates.length} (${((Date.now() - startedAt) / 1000).toFixed(1)}s)`);
-    }
-
-    const tmdbMeta = await getTmdbMetadata(tmdbId);
-    if (!tmdbMeta) return;
-
-    const showName = tmdbMeta.details.name;
-    const audit = evaluateExclusion(tmdbId, showName, tmdbMeta);
-
-    if (audit.exclude) {
-      auditLogs.push({ name: showName, status: "DROPPED BY FILTER", detail: audit.reason });
-      return;
-    }
-
-    const maxSeasonHint = Array.isArray(tmdbMeta.details.seasons)
-      ? Math.max(1, ...tmdbMeta.details.seasons.map(s => Number(s.season_number) || 0))
-      : 1;
-
-    filteredCandidates.push({
-      tmdbId,
-      showName,
-      audit,
-      maxSeasonHint,
-      imdbId: tmdbMeta.imdbId || null,
-      stremioId: `tmdb:${tmdbId}`,
-      tmdbDetails: tmdbMeta.details,
-      tmdbMeta
-    });
-  });
-
-  console.log(`Fetching Next Episode dates for ${filteredCandidates.length} kept shows...`);
-  let completedNextEpisode = 0;
-  let showsWithDates = 0;
-
-  const activeCandidates = await mapWithConcurrency(filteredCandidates, NEXT_EPISODE_CONCURRENCY, async (item) => {
-    const nextEpisodeData = await getNextEpisodeScheduleData(item.showName, todayStr, item.maxSeasonHint);
-    const nextEpisodeDate = isValidYmd(nextEpisodeData.primaryDate) ? nextEpisodeData.primaryDate : "";
-    if (nextEpisodeDate) showsWithDates++;
-    completedNextEpisode++;
-    if (completedNextEpisode % 25 === 0 || completedNextEpisode === filteredCandidates.length) {
-      console.log(
-        `Next Episode progress: ${completedNextEpisode}/${filteredCandidates.length} (withDates=${showsWithDates}, elapsed=${((Date.now() - startedAt) / 1000).toFixed(1)}s)`
-      );
-    }
-    return {
-      ...item,
-      nextEpisodeData,
-      nextEpisodeDate
-    };
-  });
-
-  activeCandidates.sort((a, b) => {
-    const aHas = isValidYmd(a.nextEpisodeDate);
-    const bHas = isValidYmd(b.nextEpisodeDate);
-    if (aHas && bHas) return b.nextEpisodeDate.localeCompare(a.nextEpisodeDate);
-    if (aHas) return -1;
-    if (bHas) return 1;
-    return a.showName.localeCompare(b.showName);
-  });
-
-  if (!fs.existsSync(CATALOG_DIR)) fs.mkdirSync(CATALOG_DIR, { recursive: true });
-  if (!fs.existsSync(META_DIR)) {
-    fs.mkdirSync(META_DIR, { recursive: true });
-  } else {
-    for (const existingFile of fs.readdirSync(META_DIR)) {
-      if (existingFile.endsWith(".json")) {
-        fs.unlinkSync(path.join(META_DIR, existingFile));
-      }
-    }
-  }
-
-  console.log(`Generating static meta files for ${activeCandidates.length} shows...`);
-  const metas = await mapWithConcurrency(activeCandidates, 6, async (item) => {
-    auditLogs.push({
-      name: item.showName,
-      status: "KEPT",
-      nextEpisodeDate: item.nextEpisodeDate || "-",
-      mappedEpisodes: item.nextEpisodeData?.episodeDateMap?.size || 0,
-      detail: item.audit.reason
-    });
-
-    const posterDate = item.nextEpisodeDate || undefined;
-    const videos = await buildSeriesVideos(
-      item.tmdbId,
-      item.stremioId,
-      item.tmdbDetails,
-      item.nextEpisodeData
-    );
-
-    const metaObj = {
-      id: item.stremioId,
-      imdb_id: item.imdbId || undefined,
-      tmdb_id: item.tmdbId,
-      type: "series",
-      name: item.showName,
-      genres: item.tmdbMeta.genres,
-      releaseInfo: posterDate,
-      description: item.tmdbDetails.overview || "",
-      poster: item.tmdbDetails.poster_path ? `https://image.tmdb.org/t/p/original${item.tmdbDetails.poster_path}` : null,
-      background: item.tmdbDetails.backdrop_path ? `https://image.tmdb.org/t/p/original${item.tmdbDetails.backdrop_path}` : null,
-      videos
-    };
-
-    writeMetaFiles(item.stremioId, metaObj);
-
-    return {
-      id: item.stremioId,
-      imdb_id: item.imdbId || undefined,
-      tmdb_id: item.tmdbId,
-      type: "series",
-      name: item.showName,
-      genres: item.tmdbMeta.genres,
-      releaseInfo: posterDate,
-      description: item.tmdbDetails.overview || "",
-      poster: item.tmdbDetails.poster_path ? `https://image.tmdb.org/t/p/original${item.tmdbDetails.poster_path}` : null,
-      background: item.tmdbDetails.backdrop_path ? `https://image.tmdb.org/t/p/original${item.tmdbDetails.backdrop_path}` : null
-    };
-  });
-
-  const filePath = path.join(CATALOG_DIR, "tvmaze_weekly_schedule.json");
-  fs.writeFileSync(filePath, JSON.stringify({ metas }, null, 2));
-
-  console.log("\n=================================================================================");
-  console.log("            TMDB DAILY DISCOVERY REPORT SUMMARY                                ");
-  console.log("=================================================================================");
-  console.table(auditLogs);
-  console.log("=================================================================================\n");
-  console.log(`Successfully generated ${metas.length} shows (${showsWithDates} with next-episode dates) in ${((Date.now() - startedAt) / 1000).toFixed(1)}s.`);
-}
-
-build().catch(err => { console.error(err); process.exit(1); });
+    const data = await fetchEpguidesScheduleData(DEBUG_ONLY_SHOW, todayStr, persistentCache, true);
+    savePersistentDateCache(persistentCache);
+    console.log("[DEBUG RESULT] primaryDate:", data.primaryDate, "mapSize:", data.episodeDateMap.size);
+    console.
