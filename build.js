@@ -1,7 +1,7 @@
 /**
  * build.js — Stremio & Wako compatible static catalog + meta generator
  * TMDB Daily Discover + Next-Episode.net dates
- * Scrapes all seasons with bounded concurrency + URL cache; zero TMDB air_date usage.
+ * All dates come strictly from next-episode.net (zero TMDB air_date usage).
  */
 
 import fs from "fs";
@@ -20,11 +20,12 @@ const CATALOG_DIR = path.join(__dirname, "catalog", "series");
 const META_DIR = path.join(__dirname, "meta", "series");
 const LOOKAHEAD_DAYS = 3;
 const RETENTION_DAYS_BACK = 9;
-const NEXT_EPISODE_CONCURRENCY = 5;
-const NEXT_EPISODE_DELAY_MS = 50;
+const NEXT_EPISODE_CONCURRENCY = 3;
+const NEXT_EPISODE_DELAY_MS = 200;
 
 const auditLogs = [];
 const htmlCache = new Map();
+let debugSampleCount = 0;
 
 const MONTHS = {
   jan: "01",
@@ -62,7 +63,7 @@ async function fetchJSON(url, timeoutMs = 8000) {
   }
 }
 
-async function fetchNextEpisodeHTML(url, timeoutMs = 4500, retries = 1) {
+async function fetchNextEpisodeHTML(url, timeoutMs = 7000, retries = 2) {
   if (htmlCache.has(url)) {
     return htmlCache.get(url);
   }
@@ -76,15 +77,21 @@ async function fetchNextEpisodeHTML(url, timeoutMs = 4500, retries = 1) {
         redirect: "follow",
         headers: {
           "User-Agent":
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
           "Accept-Language": "en-US,en;q=0.9",
+          "Cache-Control": "no-cache",
           "Referer": "https://next-episode.net/"
         }
       });
 
-      if (res.status === 429 && attempt < retries) {
-        await sleep(400 * (attempt + 1));
+      if (debugSampleCount < 8) {
+        debugSampleCount++;
+        console.log(`[NE Debug] ${url} -> HTTP ${res.status}`);
+      }
+
+      if ((res.status === 429 || res.status === 503) && attempt < retries) {
+        await sleep(1000 * (attempt + 1));
         continue;
       }
 
@@ -92,9 +99,13 @@ async function fetchNextEpisodeHTML(url, timeoutMs = 4500, retries = 1) {
       const result = res.ok ? text : null;
       htmlCache.set(url, result);
       return result;
-    } catch {
+    } catch (err) {
+      if (debugSampleCount < 8) {
+        debugSampleCount++;
+        console.log(`[NE Debug] ${url} -> Error: ${err?.message || "fetch failed"}`);
+      }
       if (attempt < retries) {
-        await sleep(250 * (attempt + 1));
+        await sleep(600 * (attempt + 1));
         continue;
       }
       htmlCache.set(url, null);
@@ -278,13 +289,13 @@ function parseShowPageDates(html, cutoffDate) {
 
   const plainText = stripTags(html);
   const dateMatches = [
-    ...plainText.matchAll(/\b(?:Date|Air Date)\s*:?\s*((?:[A-Za-z]{3}\s+)?[A-Za-z]{3}\s+\d{1,2},\s+\d{4})\b/gi)
+    ...plainText.matchAll(/\b(?:[A-Za-z]{3}\s+)?([A-Za-z]{3})\s+(\d{1,2}),\s+(\d{4})\b/g)
   ];
 
   const allDates = [
     ...new Set(
       dateMatches
-        .map(m => parseNextEpisodeDateText(m[1]))
+        .map(m => parseNextEpisodeDateText(m[0]))
         .filter(isValidYmd)
     )
   ].sort((a, b) => b.localeCompare(a));
