@@ -1,7 +1,7 @@
 /**
  * build.js — Stremio & Wako compatible static catalog + meta generator
  * TMDB Daily Discover + Next-Episode.net dates
- * Generalized next-episode.net scraper for any show; zero TMDB air_date usage.
+ * Scrapes all seasons with bounded concurrency + URL cache; zero TMDB air_date usage.
  */
 
 import fs from "fs";
@@ -20,9 +20,11 @@ const CATALOG_DIR = path.join(__dirname, "catalog", "series");
 const META_DIR = path.join(__dirname, "meta", "series");
 const LOOKAHEAD_DAYS = 3;
 const RETENTION_DAYS_BACK = 9;
-const NEXT_EPISODE_DELAY_MS = 350;
+const NEXT_EPISODE_CONCURRENCY = 5;
+const NEXT_EPISODE_DELAY_MS = 50;
 
 const auditLogs = [];
+const htmlCache = new Map();
 
 const MONTHS = {
   jan: "01",
@@ -60,7 +62,11 @@ async function fetchJSON(url, timeoutMs = 8000) {
   }
 }
 
-async function fetchNextEpisodeHTML(url, timeoutMs = 8000, retries = 2) {
+async function fetchNextEpisodeHTML(url, timeoutMs = 4500, retries = 1) {
+  if (htmlCache.has(url)) {
+    return htmlCache.get(url);
+  }
+
   for (let attempt = 0; attempt <= retries; attempt++) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -78,22 +84,27 @@ async function fetchNextEpisodeHTML(url, timeoutMs = 8000, retries = 2) {
       });
 
       if (res.status === 429 && attempt < retries) {
-        await sleep(1500 * (attempt + 1));
+        await sleep(400 * (attempt + 1));
         continue;
       }
 
       const text = await res.text();
-      return res.ok ? text : null;
+      const result = res.ok ? text : null;
+      htmlCache.set(url, result);
+      return result;
     } catch {
       if (attempt < retries) {
-        await sleep(800 * (attempt + 1));
+        await sleep(250 * (attempt + 1));
         continue;
       }
+      htmlCache.set(url, null);
       return null;
     } finally {
       clearTimeout(timer);
     }
   }
+
+  htmlCache.set(url, null);
   return null;
 }
 
@@ -229,10 +240,10 @@ function parseSeasonTableHtml(html, fallbackSeasonNumber = 0) {
   const headingMatch = html.match(/\bSeason\s+(\d{1,2})\b/i);
   const seasonNumber = headingMatch ? Number(headingMatch[1]) : fallbackSeasonNumber;
 
-  // 1. Parse table rows where column 1 is episode number and last column (or any cell) has a date
   const trMatches = [...html.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/gi)];
   for (const tr of trMatches) {
-    const cells = [...tr[1].matchAll(/<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi)].map(c => stripTags(c[1]));
+    const rowHtml = tr[1];
+    const cells = [...rowHtml.matchAll(/<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi)].map(c => stripTags(c[1]));
     if (cells.length < 2) continue;
 
     const epNum = Number(cells[0].match(/^\d{1,3}$/)?.[0] || "");
@@ -247,7 +258,6 @@ function parseSeasonTableHtml(html, fallbackSeasonNumber = 0) {
     }
   }
 
-  // 2. Fallback for non-table episode blocks on season/show pages
   if (result.size === 0) {
     const plainText = stripTags(html);
     const epRegex = /\b(?:Episode\s*#?\s*(\d{1,3})|S\d{1,2}\s*E(\d{1,3})|\d{1,2}x(\d{1,3}))\b[\s\S]{0,180}?((?:[A-Za-z]{3}\s+)?[A-Za-z]{3}\s+\d{1,2},\s+\d{4})/gi;
@@ -263,9 +273,6 @@ function parseSeasonTableHtml(html, fallbackSeasonNumber = 0) {
   return { seasonNumber, episodes: result };
 }
 
-/**
- * Parses show-level pages for dates and links to /<slug>/season-<N>.
- */
 function parseShowPageDates(html, cutoffDate) {
   if (!html) return { primaryDate: "", allDates: [], seasonNumbers: [] };
 
@@ -328,17 +335,11 @@ async function getNextEpisodeScheduleData(showName, cutoffDate, maxSeasonHint = 
       "trailers", "top", "popular", "recent", "privacy", "terms", "contact", "faq", "premium", "shows"
     ]);
 
-    const searchQueries = [
-      `https://next-episode.net/search/?name=${encodeURIComponent(showName)}`,
-      `https://next-episode.net/search/?q=${encodeURIComponent(showName)}`
-    ];
-
-    const scoredCandidates = [];
-    for (const sUrl of searchQueries) {
-      await sleep(NEXT_EPISODE_DELAY_MS);
-      const searchHtml = await fetchNextEpisodeHTML(sUrl);
-      if (!searchHtml) continue;
-
+    await sleep(NEXT_EPISODE_DELAY_MS);
+    const searchUrl = `https://next-episode.net/search/?name=${encodeURIComponent(showName)}`;
+    const searchHtml = await fetchNextEpisodeHTML(searchUrl);
+    if (searchHtml) {
+      const scoredCandidates = [];
       for (const aMatch of searchHtml.matchAll(/<a[^>]+href=["']\/([a-z0-9-]+)(?:\/[^"']*)?["'][^>]*>([\s\S]*?)<\/a>/gi)) {
         const candidateSlug = aMatch[1].toLowerCase();
         if (ignoredPaths.has(candidateSlug) || candidateSlug.startsWith("season-")) continue;
@@ -348,23 +349,22 @@ async function getNextEpisodeScheduleData(showName, cutoffDate, maxSeasonHint = 
           scoredCandidates.push({ slug: candidateSlug, score });
         }
       }
-      if (scoredCandidates.length > 0) break;
-    }
 
-    scoredCandidates.sort((a, b) => b.score - a.score);
-    const uniqueCandidates = [...new Map(scoredCandidates.map(c => [c.slug, c])).values()].slice(0, 3);
+      scoredCandidates.sort((a, b) => b.score - a.score);
+      const uniqueCandidates = [...new Map(scoredCandidates.map(c => [c.slug, c])).values()].slice(0, 2);
 
-    for (const cand of uniqueCandidates) {
-      await sleep(NEXT_EPISODE_DELAY_MS);
-      const candidateHtml = await fetchNextEpisodeHTML(`https://next-episode.net/${cand.slug}`);
-      if (!candidateHtml) continue;
-      const info = parseShowPageDates(candidateHtml, cutoffDate);
-      if (info.primaryDate || info.seasonNumbers.length > 0 || /\bEpisodes\b/i.test(candidateHtml)) {
-        matchedSlug = cand.slug;
-        primaryDate = info.primaryDate;
-        allDates = info.allDates;
-        discoveredSeasons = info.seasonNumbers;
-        break;
+      for (const cand of uniqueCandidates) {
+        await sleep(NEXT_EPISODE_DELAY_MS);
+        const candidateHtml = await fetchNextEpisodeHTML(`https://next-episode.net/${cand.slug}`);
+        if (!candidateHtml) continue;
+        const info = parseShowPageDates(candidateHtml, cutoffDate);
+        if (info.primaryDate || info.seasonNumbers.length > 0 || /\bEpisodes\b/i.test(candidateHtml)) {
+          matchedSlug = cand.slug;
+          primaryDate = info.primaryDate;
+          allDates = info.allDates;
+          discoveredSeasons = info.seasonNumbers;
+          break;
+        }
       }
     }
   }
@@ -377,7 +377,7 @@ async function getNextEpisodeScheduleData(showName, cutoffDate, maxSeasonHint = 
     const seasonsToFetch =
       discoveredSeasons.length > 0
         ? discoveredSeasons
-        : Array.from({ length: Math.min(highestSeason, 25) }, (_, idx) => idx + 1);
+        : Array.from({ length: Math.min(highestSeason, 30) }, (_, idx) => idx + 1);
 
     for (const sNum of seasonsToFetch) {
       await sleep(NEXT_EPISODE_DELAY_MS);
@@ -664,20 +664,20 @@ async function build() {
   });
 
   console.log(`Fetching Next Episode dates for ${filteredCandidates.length} kept shows...`);
-  const activeCandidates = [];
-  for (let i = 0; i < filteredCandidates.length; i++) {
-    const item = filteredCandidates[i];
-    if ((i + 1) % 25 === 0 || i + 1 === filteredCandidates.length) {
-      console.log(`Next Episode progress: ${i + 1}/${filteredCandidates.length} (${((Date.now() - startedAt) / 1000).toFixed(1)}s)`);
-    }
+  let completedNextEpisode = 0;
+  const activeCandidates = await mapWithConcurrency(filteredCandidates, NEXT_EPISODE_CONCURRENCY, async (item) => {
     const nextEpisodeData = await getNextEpisodeScheduleData(item.showName, todayStr, item.maxSeasonHint);
     const nextEpisodeDate = isValidYmd(nextEpisodeData.primaryDate) ? nextEpisodeData.primaryDate : "";
-    activeCandidates.push({
+    completedNextEpisode++;
+    if (completedNextEpisode % 25 === 0 || completedNextEpisode === filteredCandidates.length) {
+      console.log(`Next Episode progress: ${completedNextEpisode}/${filteredCandidates.length} (${((Date.now() - startedAt) / 1000).toFixed(1)}s)`);
+    }
+    return {
       ...item,
       nextEpisodeData,
       nextEpisodeDate
-    });
-  }
+    };
+  });
 
   activeCandidates.sort((a, b) => {
     const aHas = isValidYmd(a.nextEpisodeDate);
