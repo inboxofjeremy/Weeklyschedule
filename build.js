@@ -23,8 +23,8 @@ const RETENTION_DAYS_BACK = 9;
 const NEXT_EPISODE_CONCURRENCY = 3;
 const NEXT_EPISODE_DELAY_MS = 200;
 
-// Set to a show name (e.g. "Stick") to debug a single show, or "" for full run
-const DEBUG_ONLY_SHOW = "";
+//Set to a show name (e.g. "Stick") to debug a single show, or "" for full run
+const DEBUG_ONLY_SHOW = "Stick";
 
 const auditLogs = [];
 const htmlCache = new Map();
