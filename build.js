@@ -245,9 +245,14 @@ function scoreCandidateMatch(showName, candidateSlug, anchorText = "") {
   return hits / showTokens.length + exactSlugMatch;
 }
 
+function isRealShowPage(html, info) {
+  if (!html) return false;
+  if (info.allDates.length > 0 || info.seasonNumbers.length > 0) return true;
+  return /\bEpisodes\s+Guide\b/i.test(html) || /\bAir\s+Date\b/i.test(html);
+}
+
 /**
  * Parses a /<slug>/season-<N> page into { seasonNumber, episodes: Map<episodeNum, ymd> }
- * Uses fallbackSeasonNumber (from URL /season-<N>) so navbar links never override seasonNumber.
  */
 function parseSeasonTableHtml(html, fallbackSeasonNumber = 1) {
   const result = new Map();
@@ -297,17 +302,24 @@ function parseShowPageInfo(html) {
   return { allDates, seasonNumbers };
 }
 
-function pickPrimaryDate(datesAsc, cutoffDate) {
-  if (!Array.isArray(datesAsc) || datesAsc.length === 0) return "";
-  const pastOrToday = [...datesAsc].reverse().find(d => d <= cutoffDate);
+/**
+ * Picks the most recent date <= cutoffDate (or earliest upcoming date if all are in the future).
+ * When season dates are available, prefers dates from the highest season scraped so old seasons
+ * on long-running shows don't override current dates.
+ */
+function pickPrimaryDate(datesAsc, cutoffDate, latestSeasonDatesAsc = []) {
+  const pool = latestSeasonDatesAsc.length > 0 ? latestSeasonDatesAsc : datesAsc;
+  if (!Array.isArray(pool) || pool.length === 0) return "";
+  const pastOrToday = [...pool].reverse().find(d => d <= cutoffDate);
   if (pastOrToday) return pastOrToday;
-  return datesAsc[0];
+  return pool[0];
 }
 
 async function getNextEpisodeScheduleData(showName, cutoffDate, maxSeasonHint = 1) {
   const slugs = toNextEpisodeSlugs(showName);
   const episodeDateMap = new Map();
   let allDates = [];
+  let latestSeasonDatesAsc = [];
 
   let matchedSlug = "";
   let discoveredSeasons = [];
@@ -318,7 +330,7 @@ async function getNextEpisodeScheduleData(showName, cutoffDate, maxSeasonHint = 
     if (!showHtml) continue;
 
     const info = parseShowPageInfo(showHtml);
-    if (info.allDates.length > 0 || info.seasonNumbers.length > 0 || /\bEpisodes\b/i.test(showHtml)) {
+    if (isRealShowPage(showHtml, info)) {
       matchedSlug = slug;
       allDates = [...info.allDates];
       discoveredSeasons = info.seasonNumbers;
@@ -355,7 +367,7 @@ async function getNextEpisodeScheduleData(showName, cutoffDate, maxSeasonHint = 
         const candidateHtml = await fetchNextEpisodeHTML(`https://next-episode.net/${cand.slug}`);
         if (!candidateHtml) continue;
         const info = parseShowPageInfo(candidateHtml);
-        if (info.allDates.length > 0 || info.seasonNumbers.length > 0 || /\bEpisodes\b/i.test(candidateHtml)) {
+        if (isRealShowPage(candidateHtml, info)) {
           matchedSlug = cand.slug;
           allDates = [...info.allDates];
           discoveredSeasons = info.seasonNumbers;
@@ -392,9 +404,14 @@ async function getNextEpisodeScheduleData(showName, cutoffDate, maxSeasonHint = 
       }
 
       consecutiveEmptyAfterSeason1 = 0;
+      const currentSeasonDates = new Set();
       for (const [epNum, ymd] of parsedSeason.episodes.entries()) {
         episodeDateMap.set(`${parsedSeason.seasonNumber}:${epNum}`, ymd);
         seasonDatesSet.add(ymd);
+        currentSeasonDates.add(ymd);
+      }
+      if (currentSeasonDates.size > 0) {
+        latestSeasonDatesAsc = [...currentSeasonDates].sort((a, b) => a.localeCompare(b));
       }
     }
 
@@ -405,7 +422,7 @@ async function getNextEpisodeScheduleData(showName, cutoffDate, maxSeasonHint = 
     }
   }
 
-  const primaryDate = pickPrimaryDate(allDates, cutoffDate);
+  const primaryDate = pickPrimaryDate(allDates, cutoffDate, latestSeasonDatesAsc);
   return { primaryDate, allDates, episodeDateMap };
 }
 
@@ -439,7 +456,6 @@ async function getTmdbMetadata(tmdbId, country = "US") {
 
 /**
  * Builds Stremio videos using next-episode.net episodeDateMap.
- * Only falls back to primaryDate when episodeDateMap has no date for that episode.
  */
 async function buildSeriesVideos(tmdbId, stremioId, tmdbDetails, nextEpisodeData) {
   const seasons = Array.isArray(tmdbDetails.seasons)
