@@ -150,39 +150,100 @@ function pickPrimaryDate(allDatesAsc, cutoffDate, latestSeasonDatesAsc = []) {
   return [...pool].reverse().find((d) => d <= cutoffDate) || pool[0];
 }
 
+function collectEpisodeRecords(payload) {
+  const records = [];
+  const seen = new Set();
+
+  function walk(node, inheritedSeason = 0) {
+    if (!node || typeof node !== "object") return;
+    if (seen.has(node)) return;
+    seen.add(node);
+
+    if (Array.isArray(node)) {
+      for (const entry of node) {
+        walk(entry, inheritedSeason);
+      }
+      return;
+    }
+
+    const explicitSeason = Number(
+      node.season ??
+        node.season_number ??
+        node.seasonNumber ??
+        node.s ??
+        node.episode?.season ??
+        node.episode?.season_number ??
+        inheritedSeason ??
+        0
+    );
+    const seasonForChildren = explicitSeason > 0 ? explicitSeason : inheritedSeason;
+
+    const explicitEpisode = Number(
+      node.episode ??
+        node.episode_number ??
+        node.episodeNumber ??
+        node.number ??
+        node.e ??
+        node.episode?.episode ??
+        node.episode?.episode_number ??
+        node.episode?.number ??
+        0
+    );
+
+    const rawDate =
+      node.airdate ??
+      node.air_date ??
+      node.release_date ??
+      node.releaseDate ??
+      node.date ??
+      node.air_date_utc ??
+      node.episode?.airdate ??
+      node.episode?.air_date ??
+      node.episode?.release_date ??
+      null;
+
+    if (explicitEpisode > 0 && rawDate) {
+      records.push({
+        season: seasonForChildren,
+        episode: explicitEpisode,
+        rawDate
+      });
+    }
+
+    for (const [key, val] of Object.entries(node)) {
+      if (!val || typeof val !== "object") continue;
+      if (["poster", "background", "still", "image", "images", "network", "networks"].includes(key)) {
+        continue;
+      }
+      const keyAsSeason = /^s(?:eason)?[_-]?(\d+)$/i.exec(key);
+      const nextSeason = keyAsSeason ? Number(keyAsSeason[1]) : seasonForChildren;
+      walk(val, nextSeason);
+    }
+  }
+
+  walk(payload, 0);
+  return records;
+}
+
 function parseEpisodesPayload(payload) {
   const episodeDateMap = new Map();
   let highestSeason = 0;
   const seasonDates = new Map();
   const allDatesSet = new Set();
 
-  if (!payload || typeof payload !== "object") {
-    return { episodeDateMap, allDates: [], latestSeasonDatesAsc: [] };
-  }
+  const records = collectEpisodeRecords(payload);
 
-  const rawList = Array.isArray(payload)
-    ? payload
-    : Array.isArray(payload.episodes)
-      ? payload.episodes
-      : payload.episodes && typeof payload.episodes === "object"
-        ? Object.values(payload.episodes).flat()
-        : Array.isArray(payload.data)
-          ? payload.data
-          : [];
-
-  for (const item of rawList) {
-    if (!item || typeof item !== "object") continue;
-    const season = Number(item.season ?? item.season_number ?? item.seasonNumber ?? item.s ?? 0);
-    const episode = Number(item.episode ?? item.episode_number ?? item.episodeNumber ?? item.number ?? item.e ?? 0);
-    const rawDate = item.airdate ?? item.air_date ?? item.release_date ?? item.releaseDate ?? item.date ?? null;
-    const ymd = normalizeDateYmd(rawDate);
+  for (const rec of records) {
+    const ymd = normalizeDateYmd(rec.rawDate);
     if (!isValidYmd(ymd)) continue;
+
     allDatesSet.add(ymd);
-    if (season > 0 && episode > 0) {
-      episodeDateMap.set(`${season}:${episode}`, ymd);
-      if (season > highestSeason) highestSeason = season;
-      if (!seasonDates.has(season)) seasonDates.set(season, new Set());
-      seasonDates.get(season).add(ymd);
+
+    if (rec.season > 0 && rec.episode > 0) {
+      episodeDateMap.set(`${rec.season}:${rec.episode}`, ymd);
+      if (rec.season > highestSeason) highestSeason = rec.season;
+      if (!seasonDates.has(rec.season)) seasonDates.set(rec.season, new Set());
+      seasonDates.get(rec.season).add(ymd);
     }
   }
 
@@ -314,24 +375,29 @@ async function buildSeriesVideos(tmdbId, stremioId, tmdbDetails, scheduleData) {
   const seasonPayloads = await Promise.all(
     seasons.map((s) => fetchJSON(`https://api.themoviedb.org/3/tv/${tmdbId}/season/${s.season_number}?api_key=${TMDB_API_KEY}`))
   );
-  const episodeDateMap = scheduleData?.episodeDateMap || new Map();
-  const fallbackDate = isValidYmd(scheduleData?.primaryDate) ? scheduleData.primaryDate : "";
+  const episodeDateMap =
+    scheduleData?.episodeDateMap instanceof Map
+      ? scheduleData.episodeDateMap
+      : new Map(Object.entries(scheduleData?.episodeDateMap || {}));
   const videos = [];
 
   for (const seasonData of seasonPayloads) {
     if (!seasonData || !Array.isArray(seasonData.episodes)) continue;
     for (const ep of seasonData.episodes) {
       if (typeof ep.episode_number !== "number") continue;
-      const epDate = episodeDateMap.get(`${seasonData.season_number}:${ep.episode_number}`) || fallbackDate;
-      videos.push({
+      const epDate = episodeDateMap.get(`${seasonData.season_number}:${ep.episode_number}`);
+      const videoObj = {
         id: `${stremioId}:${seasonData.season_number}:${ep.episode_number}`,
         title: ep.name || `Episode ${ep.episode_number}`,
         season: seasonData.season_number,
         episode: ep.episode_number,
-        released: toIsoMidnight(epDate),
         overview: ep.overview || undefined,
         thumbnail: ep.still_path ? `https://image.tmdb.org/t/p/w500${ep.still_path}` : undefined
-      });
+      };
+      if (isValidYmd(epDate)) {
+        videoObj.released = toIsoMidnight(epDate);
+      }
+      videos.push(videoObj);
     }
   }
   return videos;
