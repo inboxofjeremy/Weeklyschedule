@@ -1,7 +1,7 @@
 /**
  * build.js — Stremio & Wako compatible static catalog + meta generator
  * TMDB Daily Discover + Next-Episode.net dates
- * Every episode receives a next-episode.net date (no TMDB air_date usage).
+ * Generalized next-episode.net scraper for any show; zero TMDB air_date usage.
  */
 
 import fs from "fs";
@@ -140,20 +140,44 @@ function toIsoMidnight(dateStr) {
   return `${dateStr}T00:00:00.000Z`;
 }
 
-function toNextEpisodeSlugs(title) {
-  const base = (title || "")
+function normalizeTitleTokens(str) {
+  return (str || "")
     .toLowerCase()
     .replace(/['’]/g, "")
-    .replace(/&/g, "and")
-    .trim();
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+}
 
-  const dashed = base.replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
-  const compact = base.replace(/[^a-z0-9]+/g, "");
+function toNextEpisodeSlugs(title) {
+  const raw = (title || "").toLowerCase().trim();
+  if (!raw) return [];
 
-  return [...new Set([dashed, compact].filter(Boolean))];
+  const variants = [
+    raw,
+    raw.replace(/\s*\([^)]*\)\s*/g, " "),
+    raw.replace(/^(the|a|an)\s+/i, ""),
+    raw.replace(/\s*\([^)]*\)\s*/g, " ").replace(/^(the|a|an)\s+/i, "")
+  ];
+
+  const slugs = [];
+  for (const v of variants) {
+    const cleaned = v
+      .replace(/['’]/g, "")
+      .replace(/&/g, "and")
+      .trim();
+    const dashed = cleaned.replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+    const compact = cleaned.replace(/[^a-z0-9]+/g, "");
+    if (dashed) slugs.push(dashed);
+    if (compact) slugs.push(compact);
+  }
+
+  return [...new Set(slugs)];
 }
 
 function parseNextEpisodeDateText(rawDateText) {
+  if (!rawDateText) return null;
   const match = rawDateText.match(/\b(?:[A-Za-z]{3}\s+)?([A-Za-z]{3})\s+(\d{1,2}),\s+(\d{4})\b/);
   if (!match) return null;
 
@@ -166,103 +190,218 @@ function parseNextEpisodeDateText(rawDateText) {
   return isValidYmd(ymd) ? ymd : null;
 }
 
-function htmlToPlainText(html) {
-  return html
+function stripTags(str) {
+  return str
     .replace(/<script[\s\S]*?<\/script>/gi, " ")
     .replace(/<style[\s\S]*?<\/style>/gi, " ")
     .replace(/<[^>]+>/g, " ")
     .replace(/&nbsp;/gi, " ")
     .replace(/&#?\w+;/gi, " ")
-    .replace(/\s+/g, " ");
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function scoreCandidateMatch(showName, candidateSlug, anchorText = "") {
+  const showTokens = normalizeTitleTokens(showName);
+  if (showTokens.length === 0) return 0;
+
+  const combinedTokens = new Set([
+    ...normalizeTitleTokens(candidateSlug.replace(/-/g, " ")),
+    ...normalizeTitleTokens(anchorText)
+  ]);
+
+  let hits = 0;
+  for (const tok of showTokens) {
+    if (combinedTokens.has(tok)) hits++;
+  }
+
+  const exactSlugMatch = toNextEpisodeSlugs(showName).includes(candidateSlug.toLowerCase()) ? 2 : 0;
+  return hits / showTokens.length + exactSlugMatch;
 }
 
 /**
- * Extracts Next-Episode.net dates and Season/Episode mappings strictly from next-episode.net HTML.
+ * Parses a /<slug>/season-<N> page into { seasonNumber, episodes: Map<episodeNum, ymd> }
  */
-function parseNextEpisodeScheduleHtml(html, cutoffDate) {
-  if (!html) return { primaryDate: "", allDates: [], episodeDateMap: new Map() };
+function parseSeasonTableHtml(html, fallbackSeasonNumber = 0) {
+  const result = new Map();
+  if (!html) return { seasonNumber: fallbackSeasonNumber, episodes: result };
 
-  const plainText = htmlToPlainText(html);
-  const episodeDateMap = new Map();
+  const headingMatch = html.match(/\bSeason\s+(\d{1,2})\b/i);
+  const seasonNumber = headingMatch ? Number(headingMatch[1]) : fallbackSeasonNumber;
 
-  const dateRegex = /\bDate\s*:?\s*((?:[A-Za-z]{3}\s+)?[A-Za-z]{3}\s+\d{1,2},\s+\d{4})\b/gi;
-  const allDatesSet = new Set();
+  // 1. Parse table rows where column 1 is episode number and last column (or any cell) has a date
+  const trMatches = [...html.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/gi)];
+  for (const tr of trMatches) {
+    const cells = [...tr[1].matchAll(/<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi)].map(c => stripTags(c[1]));
+    if (cells.length < 2) continue;
 
-  for (const m of plainText.matchAll(dateRegex)) {
-    const ymd = parseNextEpisodeDateText(m[1]);
-    if (!isValidYmd(ymd)) continue;
-    allDatesSet.add(ymd);
+    const epNum = Number(cells[0].match(/^\d{1,3}$/)?.[0] || "");
+    if (epNum <= 0) continue;
 
-    const idx = m.index ?? 0;
-    const windowStart = Math.max(0, idx - 320);
-    const windowEnd = Math.min(plainText.length, idx + m[0].length + 320);
-    const context = plainText.slice(windowStart, windowEnd);
-
-    const seMatch =
-      context.match(/\bSeason\s*:?\s*(\d{1,2})\b[\s\S]{0,120}?\bEpisode\s*:?\s*(\d{1,2})\b/i) ||
-      context.match(/\bS(\d{1,2})\s*E(\d{1,2})\b/i) ||
-      context.match(/\b(\d{1,2})x(\d{1,2})\b/i);
-
-    if (seMatch) {
-      const season = Number(seMatch[1]);
-      const episode = Number(seMatch[2]);
-      if (season > 0 && episode > 0 && !episodeDateMap.has(`${season}:${episode}`)) {
-        episodeDateMap.set(`${season}:${episode}`, ymd);
+    for (let c = cells.length - 1; c >= 1; c--) {
+      const airDateYmd = parseNextEpisodeDateText(cells[c]);
+      if (isValidYmd(airDateYmd)) {
+        result.set(epNum, airDateYmd);
+        break;
       }
     }
   }
 
-  const allDates = [...allDatesSet].sort((a, b) => b.localeCompare(a));
+  // 2. Fallback for non-table episode blocks on season/show pages
+  if (result.size === 0) {
+    const plainText = stripTags(html);
+    const epRegex = /\b(?:Episode\s*#?\s*(\d{1,3})|S\d{1,2}\s*E(\d{1,3})|\d{1,2}x(\d{1,3}))\b[\s\S]{0,180}?((?:[A-Za-z]{3}\s+)?[A-Za-z]{3}\s+\d{1,2},\s+\d{4})/gi;
+    for (const m of plainText.matchAll(epRegex)) {
+      const epNum = Number(m[1] || m[2] || m[3]);
+      const ymd = parseNextEpisodeDateText(m[4]);
+      if (epNum > 0 && isValidYmd(ymd) && !result.has(epNum)) {
+        result.set(epNum, ymd);
+      }
+    }
+  }
+
+  return { seasonNumber, episodes: result };
+}
+
+/**
+ * Parses show-level pages for dates and links to /<slug>/season-<N>.
+ */
+function parseShowPageDates(html, cutoffDate) {
+  if (!html) return { primaryDate: "", allDates: [], seasonNumbers: [] };
+
+  const plainText = stripTags(html);
+  const dateMatches = [
+    ...plainText.matchAll(/\b(?:Date|Air Date)\s*:?\s*((?:[A-Za-z]{3}\s+)?[A-Za-z]{3}\s+\d{1,2},\s+\d{4})\b/gi)
+  ];
+
+  const allDates = [
+    ...new Set(
+      dateMatches
+        .map(m => parseNextEpisodeDateText(m[1]))
+        .filter(isValidYmd)
+    )
+  ].sort((a, b) => b.localeCompare(a));
+
+  const seasonLinks = [...html.matchAll(/\/season-(\d{1,2})\b/gi)].map(m => Number(m[1]));
+  const seasonNumbers = [...new Set(seasonLinks)].filter(n => n > 0).sort((a, b) => a - b);
+
   if (allDates.length === 0) {
-    return { primaryDate: "", allDates: [], episodeDateMap };
+    return { primaryDate: "", allDates: [], seasonNumbers };
   }
 
   const pastOrToday = allDates.find(d => d <= cutoffDate);
   if (pastOrToday) {
-    return { primaryDate: pastOrToday, allDates, episodeDateMap };
+    return { primaryDate: pastOrToday, allDates, seasonNumbers };
   }
 
   const upcomingSorted = [...allDates].sort((a, b) => a.localeCompare(b));
-  return { primaryDate: upcomingSorted[0], allDates, episodeDateMap };
+  return { primaryDate: upcomingSorted[0], allDates, seasonNumbers };
 }
 
-async function getNextEpisodeScheduleData(showName, cutoffDate) {
+async function getNextEpisodeScheduleData(showName, cutoffDate, maxSeasonHint = 1) {
   const slugs = toNextEpisodeSlugs(showName);
-  if (slugs.length === 0) return { primaryDate: "", allDates: [], episodeDateMap: new Map() };
+  const episodeDateMap = new Map();
+  let primaryDate = "";
+  let allDates = [];
+
+  let matchedSlug = "";
+  let discoveredSeasons = [];
 
   for (const slug of slugs) {
     await sleep(NEXT_EPISODE_DELAY_MS);
-    const directHtml = await fetchNextEpisodeHTML(`https://next-episode.net/${slug}`);
-    const parsed = parseNextEpisodeScheduleHtml(directHtml, cutoffDate);
-    if (parsed.primaryDate) return parsed;
+    const showHtml = await fetchNextEpisodeHTML(`https://next-episode.net/${slug}`);
+    if (!showHtml) continue;
+
+    const info = parseShowPageDates(showHtml, cutoffDate);
+    if (info.primaryDate || info.seasonNumbers.length > 0 || /\bEpisodes\b/i.test(showHtml)) {
+      matchedSlug = slug;
+      primaryDate = info.primaryDate;
+      allDates = info.allDates;
+      discoveredSeasons = info.seasonNumbers;
+      break;
+    }
   }
 
-  const ignoredPaths = new Set([
-    "browse", "calendar", "login", "register", "search", "news",
-    "trailers", "top", "popular", "recent", "privacy", "terms", "contact", "faq", "premium"
-  ]);
+  if (!matchedSlug) {
+    const ignoredPaths = new Set([
+      "browse", "calendar", "login", "register", "search", "news",
+      "trailers", "top", "popular", "recent", "privacy", "terms", "contact", "faq", "premium", "shows"
+    ]);
 
-  await sleep(NEXT_EPISODE_DELAY_MS);
-  const searchUrl = `https://next-episode.net/search/?name=${encodeURIComponent(showName)}`;
-  const searchHtml = await fetchNextEpisodeHTML(searchUrl);
-  if (!searchHtml) return { primaryDate: "", allDates: [], episodeDateMap: new Map() };
+    const searchQueries = [
+      `https://next-episode.net/search/?name=${encodeURIComponent(showName)}`,
+      `https://next-episode.net/search/?q=${encodeURIComponent(showName)}`
+    ];
 
-  const searchParsed = parseNextEpisodeScheduleHtml(searchHtml, cutoffDate);
-  if (searchParsed.primaryDate) return searchParsed;
+    const scoredCandidates = [];
+    for (const sUrl of searchQueries) {
+      await sleep(NEXT_EPISODE_DELAY_MS);
+      const searchHtml = await fetchNextEpisodeHTML(sUrl);
+      if (!searchHtml) continue;
 
-  const hrefMatches = [...searchHtml.matchAll(/href=["']\/([a-z0-9-]+)["']/gi)]
-    .map(m => m[1].toLowerCase())
-    .filter(p => !ignoredPaths.has(p) && !slugs.includes(p));
+      for (const aMatch of searchHtml.matchAll(/<a[^>]+href=["']\/([a-z0-9-]+)(?:\/[^"']*)?["'][^>]*>([\s\S]*?)<\/a>/gi)) {
+        const candidateSlug = aMatch[1].toLowerCase();
+        if (ignoredPaths.has(candidateSlug) || candidateSlug.startsWith("season-")) continue;
+        const anchorText = stripTags(aMatch[2]);
+        const score = scoreCandidateMatch(showName, candidateSlug, anchorText);
+        if (score > 0) {
+          scoredCandidates.push({ slug: candidateSlug, score });
+        }
+      }
+      if (scoredCandidates.length > 0) break;
+    }
 
-  const uniquePaths = [...new Set(hrefMatches)].slice(0, 2);
-  for (const candidatePath of uniquePaths) {
-    await sleep(NEXT_EPISODE_DELAY_MS);
-    const matchedHtml = await fetchNextEpisodeHTML(`https://next-episode.net/${candidatePath}`);
-    const matchedParsed = parseNextEpisodeScheduleHtml(matchedHtml, cutoffDate);
-    if (matchedParsed.primaryDate) return matchedParsed;
+    scoredCandidates.sort((a, b) => b.score - a.score);
+    const uniqueCandidates = [...new Map(scoredCandidates.map(c => [c.slug, c])).values()].slice(0, 3);
+
+    for (const cand of uniqueCandidates) {
+      await sleep(NEXT_EPISODE_DELAY_MS);
+      const candidateHtml = await fetchNextEpisodeHTML(`https://next-episode.net/${cand.slug}`);
+      if (!candidateHtml) continue;
+      const info = parseShowPageDates(candidateHtml, cutoffDate);
+      if (info.primaryDate || info.seasonNumbers.length > 0 || /\bEpisodes\b/i.test(candidateHtml)) {
+        matchedSlug = cand.slug;
+        primaryDate = info.primaryDate;
+        allDates = info.allDates;
+        discoveredSeasons = info.seasonNumbers;
+        break;
+      }
+    }
   }
 
-  return { primaryDate: "", allDates: [], episodeDateMap: new Map() };
+  if (matchedSlug) {
+    const highestSeason = Math.max(
+      maxSeasonHint || 1,
+      discoveredSeasons.length > 0 ? Math.max(...discoveredSeasons) : 1
+    );
+    const seasonsToFetch =
+      discoveredSeasons.length > 0
+        ? discoveredSeasons
+        : Array.from({ length: Math.min(highestSeason, 25) }, (_, idx) => idx + 1);
+
+    for (const sNum of seasonsToFetch) {
+      await sleep(NEXT_EPISODE_DELAY_MS);
+      const seasonHtml = await fetchNextEpisodeHTML(`https://next-episode.net/${matchedSlug}/season-${sNum}`);
+      const parsedSeason = parseSeasonTableHtml(seasonHtml, sNum);
+      for (const [epNum, ymd] of parsedSeason.episodes.entries()) {
+        episodeDateMap.set(`${parsedSeason.seasonNumber}:${epNum}`, ymd);
+        allDates.push(ymd);
+      }
+    }
+  }
+
+  allDates = [...new Set(allDates)].sort((a, b) => b.localeCompare(a));
+  if (!primaryDate && allDates.length > 0) {
+    const pastOrToday = allDates.find(d => d <= cutoffDate);
+    if (pastOrToday) {
+      primaryDate = pastOrToday;
+    } else {
+      const upcomingSorted = [...allDates].sort((a, b) => a.localeCompare(b));
+      primaryDate = upcomingSorted[0];
+    }
+  }
+
+  return { primaryDate, allDates, episodeDateMap };
 }
 
 async function getTmdbMetadata(tmdbId, country = "US") {
@@ -294,7 +433,7 @@ async function getTmdbMetadata(tmdbId, country = "US") {
 }
 
 /**
- * Builds Stremio videos so every episode has a next-episode.net date.
+ * Builds Stremio videos so every episode has a next-episode.net date (zero TMDB air_date usage).
  */
 async function buildSeriesVideos(tmdbId, stremioId, tmdbDetails, nextEpisodeData) {
   const seasons = Array.isArray(tmdbDetails.seasons)
@@ -508,10 +647,15 @@ async function build() {
       return;
     }
 
+    const maxSeasonHint = Array.isArray(tmdbMeta.details.seasons)
+      ? Math.max(1, ...tmdbMeta.details.seasons.map(s => Number(s.season_number) || 0))
+      : 1;
+
     filteredCandidates.push({
       tmdbId,
       showName,
       audit,
+      maxSeasonHint,
       imdbId: tmdbMeta.imdbId || null,
       stremioId: `tmdb:${tmdbId}`,
       tmdbDetails: tmdbMeta.details,
@@ -526,7 +670,7 @@ async function build() {
     if ((i + 1) % 25 === 0 || i + 1 === filteredCandidates.length) {
       console.log(`Next Episode progress: ${i + 1}/${filteredCandidates.length} (${((Date.now() - startedAt) / 1000).toFixed(1)}s)`);
     }
-    const nextEpisodeData = await getNextEpisodeScheduleData(item.showName, todayStr);
+    const nextEpisodeData = await getNextEpisodeScheduleData(item.showName, todayStr, item.maxSeasonHint);
     const nextEpisodeDate = isValidYmd(nextEpisodeData.primaryDate) ? nextEpisodeData.primaryDate : "";
     activeCandidates.push({
       ...item,
