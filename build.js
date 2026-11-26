@@ -137,7 +137,7 @@ function parseNextEpisodeDateText(rawDateText) {
   return `${year}-${monthNum}-${day}`;
 }
 
-function extractDatesFromNextEpisodeHtml(html, cutoffDate) {
+function extractDatesFromNextEpisodeHtml(html, cutoffDate, debug = false) {
   if (!html) return "";
 
   const plainText = html
@@ -147,6 +147,13 @@ function extractDatesFromNextEpisodeHtml(html, cutoffDate) {
     .replace(/&nbsp;/gi, " ")
     .replace(/&#?\w+;/gi, " ")
     .replace(/\s+/g, " ");
+
+  if (debug) {
+    const aroundNov = [...plainText.matchAll(/.{0,35}\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b.{0,35}/gi)]
+      .slice(0, 8)
+      .map(m => m[0].trim());
+    console.log("[DEBUG] month snippets:", aroundNov);
+  }
 
   const dateMatches = [
     ...plainText.matchAll(/\bDate\s*:?\s*((?:[A-Za-z]{3}\s+)?[A-Za-z]{3}\s+\d{1,2},\s+\d{4})\b/gi)
@@ -172,7 +179,7 @@ async function getNextEpisodeDate(showName, cutoffDate) {
 
   for (const slug of slugs) {
     const directHtml = await fetchHTML(`https://next-episode.net/${slug}`, 8000, shouldDebug);
-    const directDate = extractDatesFromNextEpisodeHtml(directHtml, cutoffDate);
+    const directDate = extractDatesFromNextEpisodeHtml(directHtml, cutoffDate, shouldDebug);
     if (directDate) return directDate;
   }
 
@@ -185,7 +192,7 @@ async function getNextEpisodeDate(showName, cutoffDate) {
   const searchHtml = await fetchHTML(searchUrl, 8000, shouldDebug);
   if (!searchHtml) return "";
 
-  const searchPageDate = extractDatesFromNextEpisodeHtml(searchHtml, cutoffDate);
+  const searchPageDate = extractDatesFromNextEpisodeHtml(searchHtml, cutoffDate, shouldDebug);
   if (searchPageDate) return searchPageDate;
 
   const hrefMatches = [...searchHtml.matchAll(/href=["']\/([a-z0-9-]+)["']/gi)]
@@ -195,7 +202,7 @@ async function getNextEpisodeDate(showName, cutoffDate) {
   const uniquePaths = [...new Set(hrefMatches)].slice(0, 3);
   for (const candidatePath of uniquePaths) {
     const matchedHtml = await fetchHTML(`https://next-episode.net/${candidatePath}`, 8000, shouldDebug);
-    const matchedDate = extractDatesFromNextEpisodeHtml(matchedHtml, cutoffDate);
+    const matchedDate = extractDatesFromNextEpisodeHtml(matchedHtml, cutoffDate, shouldDebug);
     if (matchedDate) return matchedDate;
   }
 
