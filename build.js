@@ -1,7 +1,7 @@
 /**
  * build.js — Stremio & Wako compatible static catalog + meta generator
  * TMDB Daily Discover + Next-Episode.net dates
- * Zero TMDB air_date usage.
+ * All dates come strictly from next-episode.net (zero TMDB air_date usage).
  */
 
 import fs from "fs";
@@ -20,11 +20,11 @@ const CATALOG_DIR = path.join(__dirname, "catalog", "series");
 const META_DIR = path.join(__dirname, "meta", "series");
 const LOOKAHEAD_DAYS = 3;
 const RETENTION_DAYS_BACK = 9;
-const NEXT_EPISODE_CONCURRENCY = 3;
-const NEXT_EPISODE_DELAY_MS = 200;
+const NEXT_EPISODE_CONCURRENCY = 5;
+const NEXT_EPISODE_DELAY_MS = 75;
 
-// Set to a show name (e.g. "Stick") to inspect exact responses quickly, or "" for full run
-const DEBUG_ONLY_SHOW = "Stick";
+// Set to a show name (e.g. "Stick") to debug a single show, or "" for full run
+const DEBUG_ONLY_SHOW = "";
 
 const auditLogs = [];
 const htmlCache = new Map();
@@ -52,7 +52,7 @@ function isValidYmd(str) {
   return typeof str === "string" && /^\d{4}-\d{2}-\d{2}$/.test(str);
 }
 
-async function fetchJSON(url, timeoutMs = 8000) {
+async function fetchJSON(url, timeoutMs = 6000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -65,7 +65,7 @@ async function fetchJSON(url, timeoutMs = 8000) {
   }
 }
 
-async function fetchNextEpisodeHTML(url, timeoutMs = 7000, retries = 1) {
+async function fetchNextEpisodeHTML(url, timeoutMs = 4500, retries = 1) {
   if (htmlCache.has(url)) {
     return htmlCache.get(url);
   }
@@ -86,13 +86,18 @@ async function fetchNextEpisodeHTML(url, timeoutMs = 7000, retries = 1) {
         }
       });
 
+      if (res.status === 404) {
+        htmlCache.set(url, null);
+        return null;
+      }
+
       const text = await res.text();
       if (DEBUG_ONLY_SHOW) {
         console.log(`[FETCH] ${url} -> status=${res.status} bytes=${text.length} head=${JSON.stringify(text.slice(0, 180))}`);
       }
 
       if ((res.status === 429 || res.status === 503) && attempt < retries) {
-        await sleep(800 * (attempt + 1));
+        await sleep(600 * (attempt + 1));
         continue;
       }
 
@@ -104,7 +109,7 @@ async function fetchNextEpisodeHTML(url, timeoutMs = 7000, retries = 1) {
         console.log(`[FETCH ERR] ${url} -> ${err?.message || String(err)}`);
       }
       if (attempt < retries) {
-        await sleep(500 * (attempt + 1));
+        await sleep(300 * (attempt + 1));
         continue;
       }
       htmlCache.set(url, null);
@@ -377,19 +382,30 @@ async function getNextEpisodeScheduleData(showName, cutoffDate, maxSeasonHint = 
   }
 
   if (matchedSlug) {
+    const hasExplicitLinks = discoveredSeasons.length > 0;
     const highestSeason = Math.max(
       maxSeasonHint || 1,
-      discoveredSeasons.length > 0 ? Math.max(...discoveredSeasons) : 1
+      hasExplicitLinks ? Math.max(...discoveredSeasons) : 1
     );
-    const seasonsToFetch =
-      discoveredSeasons.length > 0
-        ? discoveredSeasons
-        : Array.from({ length: Math.min(highestSeason, 30) }, (_, idx) => idx + 1);
+    const seasonsToFetch = hasExplicitLinks
+      ? discoveredSeasons
+      : Array.from({ length: Math.min(highestSeason, 30) }, (_, idx) => idx + 1);
 
+    let consecutiveEmptyAfterSeason1 = 0;
     for (const sNum of seasonsToFetch) {
       await sleep(NEXT_EPISODE_DELAY_MS);
       const seasonHtml = await fetchNextEpisodeHTML(`https://next-episode.net/${matchedSlug}/season-${sNum}`);
       const parsedSeason = parseSeasonTableHtml(seasonHtml, sNum);
+
+      if (parsedSeason.episodes.size === 0) {
+        if (!hasExplicitLinks && sNum > 1) {
+          consecutiveEmptyAfterSeason1++;
+          if (consecutiveEmptyAfterSeason1 >= 2) break;
+        }
+        continue;
+      }
+
+      consecutiveEmptyAfterSeason1 = 0;
       for (const [epNum, ymd] of parsedSeason.episodes.entries()) {
         episodeDateMap.set(`${parsedSeason.seasonNumber}:${epNum}`, ymd);
         allDates.push(ymd);
