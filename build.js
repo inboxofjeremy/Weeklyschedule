@@ -1,7 +1,6 @@
 /**
  * build.js — Stremio & Wako compatible static catalog + meta generator
- * TMDB Daily Discover + Next-Episode.net dates
- * Poster (releaseInfo), catalog sort, and episode dates aligned to YYYY-MM-DD.
+ * Dates come strictly from next-episode.net (no TMDB air_date fallbacks).
  */
 
 import fs from "fs";
@@ -177,14 +176,30 @@ function htmlToPlainText(html) {
 }
 
 /**
- * Extracts all YYYY-MM-DD dates found on a Next-Episode.net page and picks the
- * best representative air date for the show (preferring dates up to cutoffDate,
- * or the closest upcoming date if no prior date exists).
+ * Extracts Next-Episode.net dates and optional S#E# episode mappings.
+ * Only dates from next-episode.net are returned.
  */
-function extractDatesFromNextEpisodeHtml(html, cutoffDate) {
-  if (!html) return { primaryDate: "", allDates: [] };
+function parseNextEpisodeScheduleHtml(html, cutoffDate) {
+  if (!html) return { primaryDate: "", episodeDateMap: new Map() };
 
   const plainText = htmlToPlainText(html);
+  const episodeDateMap = new Map();
+
+  // Match patterns like "S02E05 ... Date: Nov 25, 2026" or "2x05 ... Nov 25, 2026"
+  const epMatches = [
+    ...plainText.matchAll(
+      /\b(?:S(\d{1,2})\s*E(\d{1,2})|(\d{1,2})x(\d{1,2}))[\s\S]{0,180}?\bDate\s*:?\s*((?:[A-Za-z]{3}\s+)?[A-Za-z]{3}\s+\d{1,2},\s+\d{4})\b/gi
+    )
+  ];
+
+  for (const m of epMatches) {
+    const season = Number(m[1] || m[3]);
+    const episode = Number(m[2] || m[4]);
+    const ymd = parseNextEpisodeDateText(m[5]);
+    if (season > 0 && episode > 0 && isValidYmd(ymd)) {
+      episodeDateMap.set(`${season}:${episode}`, ymd);
+    }
+  }
 
   const dateMatches = [
     ...plainText.matchAll(/\bDate\s*:?\s*((?:[A-Za-z]{3}\s+)?[A-Za-z]{3}\s+\d{1,2},\s+\d{4})\b/gi)
@@ -198,26 +213,27 @@ function extractDatesFromNextEpisodeHtml(html, cutoffDate) {
     )
   ].sort((a, b) => b.localeCompare(a));
 
-  if (allDates.length === 0) return { primaryDate: "", allDates: [] };
+  if (allDates.length === 0) {
+    return { primaryDate: "", episodeDateMap };
+  }
 
-  // Prefer the most recent air date on or before cutoffDate; otherwise earliest upcoming date
   const pastOrToday = allDates.find(d => d <= cutoffDate);
   if (pastOrToday) {
-    return { primaryDate: pastOrToday, allDates };
+    return { primaryDate: pastOrToday, episodeDateMap };
   }
 
   const upcomingSorted = [...allDates].sort((a, b) => a.localeCompare(b));
-  return { primaryDate: upcomingSorted[0], allDates };
+  return { primaryDate: upcomingSorted[0], episodeDateMap };
 }
 
 async function getNextEpisodeScheduleData(showName, cutoffDate) {
   const slugs = toNextEpisodeSlugs(showName);
-  if (slugs.length === 0) return { primaryDate: "", allDates: [] };
+  if (slugs.length === 0) return { primaryDate: "", episodeDateMap: new Map() };
 
   for (const slug of slugs) {
     await sleep(NEXT_EPISODE_DELAY_MS);
     const directHtml = await fetchNextEpisodeHTML(`https://next-episode.net/${slug}`);
-    const parsed = extractDatesFromNextEpisodeHtml(directHtml, cutoffDate);
+    const parsed = parseNextEpisodeScheduleHtml(directHtml, cutoffDate);
     if (parsed.primaryDate) return parsed;
   }
 
@@ -229,9 +245,9 @@ async function getNextEpisodeScheduleData(showName, cutoffDate) {
   await sleep(NEXT_EPISODE_DELAY_MS);
   const searchUrl = `https://next-episode.net/search/?name=${encodeURIComponent(showName)}`;
   const searchHtml = await fetchNextEpisodeHTML(searchUrl);
-  if (!searchHtml) return { primaryDate: "", allDates: [] };
+  if (!searchHtml) return { primaryDate: "", episodeDateMap: new Map() };
 
-  const searchParsed = extractDatesFromNextEpisodeHtml(searchHtml, cutoffDate);
+  const searchParsed = parseNextEpisodeScheduleHtml(searchHtml, cutoffDate);
   if (searchParsed.primaryDate) return searchParsed;
 
   const hrefMatches = [...searchHtml.matchAll(/href=["']\/([a-z0-9-]+)["']/gi)]
@@ -242,11 +258,11 @@ async function getNextEpisodeScheduleData(showName, cutoffDate) {
   for (const candidatePath of uniquePaths) {
     await sleep(NEXT_EPISODE_DELAY_MS);
     const matchedHtml = await fetchNextEpisodeHTML(`https://next-episode.net/${candidatePath}`);
-    const matchedParsed = extractDatesFromNextEpisodeHtml(matchedHtml, cutoffDate);
+    const matchedParsed = parseNextEpisodeScheduleHtml(matchedHtml, cutoffDate);
     if (matchedParsed.primaryDate) return matchedParsed;
   }
 
-  return { primaryDate: "", allDates: [] };
+  return { primaryDate: "", episodeDateMap: new Map() };
 }
 
 async function getTmdbMetadata(tmdbId, country = "US") {
@@ -278,10 +294,9 @@ async function getTmdbMetadata(tmdbId, country = "US") {
 }
 
 /**
- * Builds Stremio videos using Next-Episode.net dates when available,
- * keeping all date strings as plain YYYY-MM-DD until ISO midnight formatting.
+ * Builds Stremio videos using ONLY next-episode.net dates.
  */
-async function buildSeriesVideos(tmdbId, stremioId, tmdbDetails, nextEpisodeData, cutoffDate) {
+async function buildSeriesVideos(tmdbId, stremioId, tmdbDetails, nextEpisodeData) {
   const seasons = Array.isArray(tmdbDetails.seasons)
     ? tmdbDetails.seasons
         .filter(s => typeof s.season_number === "number" && s.season_number > 0)
@@ -294,38 +309,31 @@ async function buildSeriesVideos(tmdbId, stremioId, tmdbDetails, nextEpisodeData
     )
   );
 
+  const episodeDateMap = nextEpisodeData?.episodeDateMap || new Map();
+  const primaryDate = nextEpisodeData?.primaryDate || "";
+
   const videos = [];
   for (const seasonData of seasonPayloads) {
     if (!seasonData || !Array.isArray(seasonData.episodes)) continue;
     for (const ep of seasonData.episodes) {
       if (typeof ep.episode_number !== "number") continue;
-      const epYmd = isValidYmd(ep.air_date) ? ep.air_date : "";
+      const key = `${seasonData.season_number}:${ep.episode_number}`;
+      const neYmd = episodeDateMap.get(key) || "";
       videos.push({
         id: `${stremioId}:${seasonData.season_number}:${ep.episode_number}`,
         title: ep.name || `Episode ${ep.episode_number}`,
         season: seasonData.season_number,
         episode: ep.episode_number,
-        released: toIsoMidnight(epYmd),
+        released: toIsoMidnight(neYmd),
         overview: ep.overview || undefined,
         thumbnail: ep.still_path ? `https://image.tmdb.org/t/p/w500${ep.still_path}` : undefined
       });
     }
   }
 
-  const primaryDate = nextEpisodeData?.primaryDate || "";
-  if (primaryDate && videos.length > 0) {
-    let targetIdx = -1;
-    for (let i = videos.length - 1; i >= 0; i--) {
-      const epDate = videos[i].released ? videos[i].released.slice(0, 10) : "";
-      if (epDate && epDate <= cutoffDate) {
-        targetIdx = i;
-        break;
-      }
-    }
-    if (targetIdx === -1) {
-      targetIdx = videos.length - 1;
-    }
-    videos[targetIdx].released = toIsoMidnight(primaryDate);
+  // If no per-episode map entries matched but we have a next-episode.net primaryDate, apply it to the latest episode
+  if (episodeDateMap.size === 0 && isValidYmd(primaryDate) && videos.length > 0) {
+    videos[videos.length - 1].released = toIsoMidnight(primaryDate);
   }
 
   return videos;
@@ -462,12 +470,11 @@ function writeMetaFiles(stremioId, metaObj) {
 
 async function build() {
   const startedAt = Date.now();
-  const discoveredShows = new Map();
+  const discoveredIds = new Set();
   const todayStr = pacificDateString();
 
   console.log(`Discovering English shows from TMDB (${LOOKAHEAD_DAYS}-day lookahead + ${RETENTION_DAYS_BACK}-day window)...`);
 
-  // Build exact YYYY-MM-DD date list from (today - RETENTION_DAYS_BACK) through (today + LOOKAHEAD_DAYS)
   const targetDates = [];
   for (let offset = -RETENTION_DAYS_BACK; offset <= LOOKAHEAD_DAYS; offset++) {
     targetDates.push(addDaysYmd(todayStr, offset));
@@ -484,20 +491,18 @@ async function build() {
       if (data?.results) {
         totalPages = Math.min(data.total_pages || 1, 10);
         for (const show of data.results) {
-          if (!discoveredShows.has(show.id)) {
-            discoveredShows.set(show.id, dateStr);
-          }
+          discoveredIds.add(show.id);
         }
       }
       page++;
     } while (page <= totalPages);
   });
 
-  const candidates = Array.from(discoveredShows.entries());
+  const candidates = Array.from(discoveredIds);
   console.log(`Discovered ${candidates.length} unique candidate shows in ${((Date.now() - startedAt) / 1000).toFixed(1)}s. Evaluating metadata...`);
 
   const filteredCandidates = [];
-  await mapWithConcurrency(candidates, 6, async ([tmdbId, tmdbAirDate], idx) => {
+  await mapWithConcurrency(candidates, 6, async (tmdbId, idx) => {
     if ((idx + 1) % 50 === 0 || idx + 1 === candidates.length) {
       console.log(`TMDB metadata progress: ${idx + 1}/${candidates.length} (${((Date.now() - startedAt) / 1000).toFixed(1)}s)`);
     }
@@ -517,7 +522,6 @@ async function build() {
       tmdbId,
       showName,
       audit,
-      tmdbAirDate,
       imdbId: tmdbMeta.imdbId || null,
       stremioId: `tmdb:${tmdbId}`,
       tmdbDetails: tmdbMeta.details,
@@ -533,21 +537,19 @@ async function build() {
       console.log(`Next Episode progress: ${i + 1}/${filteredCandidates.length} (${((Date.now() - startedAt) / 1000).toFixed(1)}s)`);
     }
     const nextEpisodeData = await getNextEpisodeScheduleData(item.showName, todayStr);
-    const resolvedDate = nextEpisodeData.primaryDate || "";
-    const sortKey = resolvedDate || item.tmdbAirDate || "";
+    const nextEpisodeDate = isValidYmd(nextEpisodeData.primaryDate) ? nextEpisodeData.primaryDate : "";
     activeCandidates.push({
       ...item,
       nextEpisodeData,
-      episodeDate: resolvedDate,
-      sortKey
+      nextEpisodeDate
     });
   }
 
-  // Sort by resolved YYYY-MM-DD date descending; items without a date sort last
+  // Sort strictly by next-episode.net date descending; shows without a next-episode.net date sort last
   activeCandidates.sort((a, b) => {
-    const aHas = isValidYmd(a.sortKey);
-    const bHas = isValidYmd(b.sortKey);
-    if (aHas && bHas) return b.sortKey.localeCompare(a.sortKey);
+    const aHas = isValidYmd(a.nextEpisodeDate);
+    const bHas = isValidYmd(b.nextEpisodeDate);
+    if (aHas && bHas) return b.nextEpisodeDate.localeCompare(a.nextEpisodeDate);
     if (aHas) return -1;
     if (bHas) return 1;
     return a.showName.localeCompare(b.showName);
@@ -569,19 +571,16 @@ async function build() {
     auditLogs.push({
       name: item.showName,
       status: "KEPT",
-      episodeDate: item.episodeDate || "-",
-      sortKey: item.sortKey || "-",
+      nextEpisodeDate: item.nextEpisodeDate || "-",
       detail: item.audit.reason
     });
 
-    const firstYear = item.tmdbDetails.first_air_date ? item.tmdbDetails.first_air_date.split("-")[0] : "";
-    const displayDate = item.episodeDate || item.tmdbAirDate || firstYear || undefined;
+    const posterDate = item.nextEpisodeDate || undefined;
     const videos = await buildSeriesVideos(
       item.tmdbId,
       item.stremioId,
       item.tmdbDetails,
-      item.nextEpisodeData,
-      todayStr
+      item.nextEpisodeData
     );
 
     const metaObj = {
@@ -591,8 +590,7 @@ async function build() {
       type: "series",
       name: item.showName,
       genres: item.tmdbMeta.genres,
-      year: firstYear || undefined,
-      releaseInfo: displayDate,
+      releaseInfo: posterDate,
       description: item.tmdbDetails.overview || "",
       poster: item.tmdbDetails.poster_path ? `https://image.tmdb.org/t/p/original${item.tmdbDetails.poster_path}` : null,
       background: item.tmdbDetails.backdrop_path ? `https://image.tmdb.org/t/p/original${item.tmdbDetails.backdrop_path}` : null,
@@ -608,8 +606,7 @@ async function build() {
       type: "series",
       name: item.showName,
       genres: item.tmdbMeta.genres,
-      year: firstYear || undefined,
-      releaseInfo: displayDate,
+      releaseInfo: posterDate,
       description: item.tmdbDetails.overview || "",
       poster: item.tmdbDetails.poster_path ? `https://image.tmdb.org/t/p/original${item.tmdbDetails.poster_path}` : null,
       background: item.tmdbDetails.backdrop_path ? `https://image.tmdb.org/t/p/original${item.tmdbDetails.backdrop_path}` : null
