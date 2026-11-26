@@ -1,6 +1,7 @@
 /**
  * build.js — Stremio & Wako compatible static catalog + meta generator
- * Dates come strictly from next-episode.net (no TMDB air_date fallbacks).
+ * TMDB Daily Discover + Next-Episode.net dates
+ * Dates come strictly from next-episode.net (no TMDB air_date usage).
  */
 
 import fs from "fs";
@@ -176,8 +177,7 @@ function htmlToPlainText(html) {
 }
 
 /**
- * Extracts Next-Episode.net dates and optional S#E# episode mappings.
- * Only dates from next-episode.net are returned.
+ * Extracts Next-Episode.net dates and Season/Episode mappings strictly from next-episode.net HTML.
  */
 function parseNextEpisodeScheduleHtml(html, cutoffDate) {
   if (!html) return { primaryDate: "", episodeDateMap: new Map() };
@@ -185,34 +185,34 @@ function parseNextEpisodeScheduleHtml(html, cutoffDate) {
   const plainText = htmlToPlainText(html);
   const episodeDateMap = new Map();
 
-  // Match patterns like "S02E05 ... Date: Nov 25, 2026" or "2x05 ... Nov 25, 2026"
-  const epMatches = [
-    ...plainText.matchAll(
-      /\b(?:S(\d{1,2})\s*E(\d{1,2})|(\d{1,2})x(\d{1,2}))[\s\S]{0,180}?\bDate\s*:?\s*((?:[A-Za-z]{3}\s+)?[A-Za-z]{3}\s+\d{1,2},\s+\d{4})\b/gi
-    )
-  ];
+  const dateRegex = /\bDate\s*:?\s*((?:[A-Za-z]{3}\s+)?[A-Za-z]{3}\s+\d{1,2},\s+\d{4})\b/gi;
+  const allDatesSet = new Set();
 
-  for (const m of epMatches) {
-    const season = Number(m[1] || m[3]);
-    const episode = Number(m[2] || m[4]);
-    const ymd = parseNextEpisodeDateText(m[5]);
-    if (season > 0 && episode > 0 && isValidYmd(ymd)) {
-      episodeDateMap.set(`${season}:${episode}`, ymd);
+  for (const m of plainText.matchAll(dateRegex)) {
+    const ymd = parseNextEpisodeDateText(m[1]);
+    if (!isValidYmd(ymd)) continue;
+    allDatesSet.add(ymd);
+
+    const idx = m.index ?? 0;
+    const windowStart = Math.max(0, idx - 220);
+    const windowEnd = Math.min(plainText.length, idx + m[0].length + 220);
+    const context = plainText.slice(windowStart, windowEnd);
+
+    const seMatch =
+      context.match(/\bSeason\s*:?\s*(\d{1,2})\b[\s\S]{0,80}?\bEpisode\s*:?\s*(\d{1,2})\b/i) ||
+      context.match(/\bS(\d{1,2})\s*E(\d{1,2})\b/i) ||
+      context.match(/\b(\d{1,2})x(\d{1,2})\b/i);
+
+    if (seMatch) {
+      const season = Number(seMatch[1]);
+      const episode = Number(seMatch[2]);
+      if (season > 0 && episode > 0 && !episodeDateMap.has(`${season}:${episode}`)) {
+        episodeDateMap.set(`${season}:${episode}`, ymd);
+      }
     }
   }
 
-  const dateMatches = [
-    ...plainText.matchAll(/\bDate\s*:?\s*((?:[A-Za-z]{3}\s+)?[A-Za-z]{3}\s+\d{1,2},\s+\d{4})\b/gi)
-  ];
-
-  const allDates = [
-    ...new Set(
-      dateMatches
-        .map(m => parseNextEpisodeDateText(m[1]))
-        .filter(isValidYmd)
-    )
-  ].sort((a, b) => b.localeCompare(a));
-
+  const allDates = [...allDatesSet].sort((a, b) => b.localeCompare(a));
   if (allDates.length === 0) {
     return { primaryDate: "", episodeDateMap };
   }
@@ -294,7 +294,7 @@ async function getTmdbMetadata(tmdbId, country = "US") {
 }
 
 /**
- * Builds Stremio videos using ONLY next-episode.net dates.
+ * Builds Stremio videos using ONLY next-episode.net dates (zero TMDB air_date usage).
  */
 async function buildSeriesVideos(tmdbId, stremioId, tmdbDetails, nextEpisodeData) {
   const seasons = Array.isArray(tmdbDetails.seasons)
@@ -331,9 +331,11 @@ async function buildSeriesVideos(tmdbId, stremioId, tmdbDetails, nextEpisodeData
     }
   }
 
-  // If no per-episode map entries matched but we have a next-episode.net primaryDate, apply it to the latest episode
-  if (episodeDateMap.size === 0 && isValidYmd(primaryDate) && videos.length > 0) {
-    videos[videos.length - 1].released = toIsoMidnight(primaryDate);
+  if (isValidYmd(primaryDate) && videos.length > 0) {
+    const primaryIso = toIsoMidnight(primaryDate);
+    if (!videos.some(v => v.released === primaryIso)) {
+      videos[videos.length - 1].released = primaryIso;
+    }
   }
 
   return videos;
@@ -345,7 +347,6 @@ async function buildSeriesVideos(tmdbId, stremioId, tmdbDetails, nextEpisodeData
 function evaluateExclusion(tmdbId, showName, tmdbMeta) {
   const name = (showName || "").toLowerCase();
 
-  // 1. Hardcoded Whitelist Overrides (IDs and Titles)
   const whitelistedIds = [1554, 312415]; // QI, QI XL
   const whitelistedTitles = [
     "qi",
@@ -365,7 +366,6 @@ function evaluateExclusion(tmdbId, showName, tmdbMeta) {
     return { exclude: false, reason: "Whitelisted Override", whitelisted: true };
   }
 
-  // 2. User Rating Check: Exclude unrated (0 votes) or ratings below 5%
   if (tmdbMeta.voteCount === 0 || (tmdbMeta.voteAverage !== null && tmdbMeta.voteAverage < 0.5)) {
     return { exclude: true, reason: `Excluded: Unrated or rating below 5% (Votes: ${tmdbMeta.voteCount})`, whitelisted: false };
   }
@@ -389,7 +389,6 @@ function evaluateExclusion(tmdbId, showName, tmdbMeta) {
 
   const lowerOverview = (tmdbMeta.details.overview || "").toLowerCase();
 
-  // 3. Language & Foreign Script Checks
   if (lang !== "en") {
     return { exclude: true, reason: `Excluded: Non-English language ('${lang}')`, whitelisted: false };
   }
@@ -399,7 +398,6 @@ function evaluateExclusion(tmdbId, showName, tmdbMeta) {
     return { exclude: true, reason: `Excluded: Contains foreign script (${showName})`, whitelisted: false };
   }
 
-  // 4. Blocked Networks
   const blockedNetworks = [
     "iqiyi", "bilibili", "wavve", "youku", "tencent qq", "vivaone",
     "premier", "смотрим", "кион", "geo entertainment", "tokyo mx"
@@ -408,7 +406,6 @@ function evaluateExclusion(tmdbId, showName, tmdbMeta) {
     return { exclude: true, reason: `Excluded: Blocked Network (${networks.join(", ")})`, whitelisted: false };
   }
 
-  // 5. Professional Wrestling Exclusion
   const wrestlingTerms = [
     "wwe", "aew", "njpw", "impact wrestling", "ring of honor", "smackdown",
     "wrestlemania", "royal rumble", "professional wrestling", "pro wrestling"
@@ -421,7 +418,6 @@ function evaluateExclusion(tmdbId, showName, tmdbMeta) {
     return { exclude: true, reason: `Excluded: Professional Wrestling (${showName})`, whitelisted: false };
   }
 
-  // 6. Exclude Vertical Short Dramas / Micro-Series patterns
   if (
     name.includes("san pito pato") ||
     name.includes("dragon baby") ||
@@ -433,7 +429,6 @@ function evaluateExclusion(tmdbId, showName, tmdbMeta) {
     return { exclude: true, reason: "Excluded: Vertical short-drama / micro-series pattern", whitelisted: false };
   }
 
-  // 7. Allowed Reality / Renovation / Game Shows
   const allowedGenres = ["panel", "quiz", "game show", "game-show", "reality", "home improvement", "renovation"];
   if (
     genres.some(g => allowedGenres.some(a => g.includes(a))) ||
@@ -443,7 +438,6 @@ function evaluateExclusion(tmdbId, showName, tmdbMeta) {
     return { exclude: false, reason: "Allowed Reality/Renovation Content", whitelisted: false };
   }
 
-  // 8. Excluded Categories (Sports, News, Talk, Pure Documentary)
   if (genres.some(g => g.includes("sports"))) {
     return { exclude: true, reason: "Excluded: Sports", whitelisted: false };
   }
