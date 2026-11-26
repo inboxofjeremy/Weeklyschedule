@@ -1,7 +1,7 @@
 /**
  * build.js — Stremio & Wako compatible static adult catalog
  * TMDB Daily Discover (3-Day Lookahead + 9-Day Rolling Window)
- * Sorted by lastEpDate first (fallback to discoveredDate) descending.
+ * Sorted strictly by last_episode_to_air.air_date descending (no fallbacks).
  */
 
 import fs from "fs";
@@ -249,7 +249,7 @@ async function build() {
   const candidates = Array.from(discoveredShows.entries());
   console.log(`Discovered ${candidates.length} unique candidate shows in ${((Date.now() - startedAt) / 1000).toFixed(1)}s. Evaluating metadata...`);
 
-  const evaluated = await mapWithConcurrency(candidates, 8, async ([tmdbId, discoveredDate], idx) => {
+  const evaluated = await mapWithConcurrency(candidates, 8, async ([tmdbId], idx) => {
     if ((idx + 1) % 50 === 0 || idx + 1 === candidates.length) {
       console.log(`Metadata progress: ${idx + 1}/${candidates.length} (${((Date.now() - startedAt) / 1000).toFixed(1)}s)`);
     }
@@ -268,9 +268,7 @@ async function build() {
     const imdbId = tmdbMeta.imdbId || null;
     const stremioId = `tmdb:${tmdbId}`;
     const tmdbDetails = tmdbMeta.details;
-
-    const lastEpDate = tmdbDetails.last_episode_to_air?.air_date || "";
-    const episodeDate = lastEpDate || discoveredDate;
+    const episodeDate = tmdbDetails.last_episode_to_air?.air_date || "";
 
     return {
       tmdbId,
@@ -280,8 +278,6 @@ async function build() {
       stremioId,
       tmdbDetails,
       tmdbMeta,
-      lastEpDate,
-      discoveredDate,
       episodeDate
     };
   });
@@ -294,9 +290,7 @@ async function build() {
     auditLogs.push({
       name: item.showName,
       status: "KEPT",
-      episodeDate: item.episodeDate,
-      lastEpDate: item.lastEpDate || "-",
-      discoveredDate: item.discoveredDate,
+      episodeDate: item.episodeDate || "-",
       detail: item.audit.reason
     });
 
