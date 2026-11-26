@@ -20,8 +20,11 @@ const CATALOG_DIR = path.join(__dirname, "catalog", "series");
 const LOOKAHEAD_DAYS = 3;
 const RETENTION_DAYS_BACK = 9;
 const DEBUG_NEXT_EPISODE = false;
+const LOG_MISSED_NEXT_EPISODE = true;
+const MAX_MISSED_LOGS = 10;
 
 let nextEpisodeDebugCount = 0;
+let missedNextEpisodeLogs = 0;
 const auditLogs = [];
 
 const MONTHS = {
@@ -72,12 +75,12 @@ async function fetchHTML(url, timeoutMs = 8000, debug = false) {
       console.log(`[DEBUG] ${url} -> status=${res.status}, finalUrl=${res.url}, len=${text.length}`);
       console.log(`[DEBUG] sample=${text.replace(/\s+/g, " ").slice(0, 300)}`);
     }
-    return res.ok ? text : null;
+    return res.ok ? { text, status: res.status, finalUrl: res.url } : { text: null, status: res.status, finalUrl: res.url };
   } catch (err) {
     if (debug) {
       console.log(`[DEBUG] ${url} -> error=${err.message}`);
     }
-    return null;
+    return { text: null, status: null, finalUrl: url, error: err.message };
   } finally {
     clearTimeout(timer);
   }
@@ -137,16 +140,20 @@ function parseNextEpisodeDateText(rawDateText) {
   return `${year}-${monthNum}-${day}`;
 }
 
-function extractDatesFromNextEpisodeHtml(html, cutoffDate, debug = false) {
-  if (!html) return "";
-
-  const plainText = html
+function htmlToPlainText(html) {
+  return html
     .replace(/<script[\s\S]*?<\/script>/gi, " ")
     .replace(/<style[\s\S]*?<\/style>/gi, " ")
     .replace(/<[^>]+>/g, " ")
     .replace(/&nbsp;/gi, " ")
     .replace(/&#?\w+;/gi, " ")
     .replace(/\s+/g, " ");
+}
+
+function extractDatesFromNextEpisodeHtml(html, cutoffDate, debug = false) {
+  if (!html) return "";
+
+  const plainText = htmlToPlainText(html);
 
   if (debug) {
     const aroundNov = [...plainText.matchAll(/.{0,35}\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b.{0,35}/gi)]
@@ -177,9 +184,20 @@ async function getNextEpisodeDate(showName, cutoffDate) {
   const shouldDebug = DEBUG_NEXT_EPISODE && nextEpisodeDebugCount < 3;
   if (shouldDebug) nextEpisodeDebugCount++;
 
+  const trace = [];
+
   for (const slug of slugs) {
-    const directHtml = await fetchHTML(`https://next-episode.net/${slug}`, 8000, shouldDebug);
-    const directDate = extractDatesFromNextEpisodeHtml(directHtml, cutoffDate, shouldDebug);
+    const url = `https://next-episode.net/${slug}`;
+    const res = await fetchHTML(url, 8000, shouldDebug);
+    const directDate = extractDatesFromNextEpisodeHtml(res.text, cutoffDate, shouldDebug);
+    trace.push({
+      step: "direct",
+      url,
+      status: res.status,
+      finalUrl: res.finalUrl,
+      len: res.text ? res.text.length : 0,
+      date: directDate || ""
+    });
     if (directDate) return directDate;
   }
 
@@ -189,24 +207,62 @@ async function getNextEpisodeDate(showName, cutoffDate) {
   ]);
 
   const searchUrl = `https://next-episode.net/search/?name=${encodeURIComponent(showName)}`;
-  const searchHtml = await fetchHTML(searchUrl, 8000, shouldDebug);
-  if (!searchHtml) return "";
+  const searchRes = await fetchHTML(searchUrl, 8000, shouldDebug);
+  if (!searchRes.text) {
+    trace.push({ step: "search", url: searchUrl, status: searchRes.status, finalUrl: searchRes.finalUrl, len: 0, date: "" });
+    logMissedIfNeeded(showName, cutoffDate, trace, null);
+    return "";
+  }
 
-  const searchPageDate = extractDatesFromNextEpisodeHtml(searchHtml, cutoffDate, shouldDebug);
+  const searchPageDate = extractDatesFromNextEpisodeHtml(searchRes.text, cutoffDate, shouldDebug);
+  trace.push({
+    step: "search_page",
+    url: searchUrl,
+    status: searchRes.status,
+    finalUrl: searchRes.finalUrl,
+    len: searchRes.text.length,
+    date: searchPageDate || ""
+  });
   if (searchPageDate) return searchPageDate;
 
-  const hrefMatches = [...searchHtml.matchAll(/href=["']\/([a-z0-9-]+)["']/gi)]
+  const hrefMatches = [...searchRes.text.matchAll(/href=["']\/([a-z0-9-]+)["']/gi)]
     .map(m => m[1].toLowerCase())
     .filter(p => !ignoredPaths.has(p) && !slugs.includes(p));
 
   const uniquePaths = [...new Set(hrefMatches)].slice(0, 3);
   for (const candidatePath of uniquePaths) {
-    const matchedHtml = await fetchHTML(`https://next-episode.net/${candidatePath}`, 8000, shouldDebug);
-    const matchedDate = extractDatesFromNextEpisodeHtml(matchedHtml, cutoffDate, shouldDebug);
+    const candidateUrl = `https://next-episode.net/${candidatePath}`;
+    const matchedRes = await fetchHTML(candidateUrl, 8000, shouldDebug);
+    const matchedDate = extractDatesFromNextEpisodeHtml(matchedRes.text, cutoffDate, shouldDebug);
+    trace.push({
+      step: "search_candidate",
+      url: candidateUrl,
+      status: matchedRes.status,
+      finalUrl: matchedRes.finalUrl,
+      len: matchedRes.text ? matchedRes.text.length : 0,
+      date: matchedDate || ""
+    });
     if (matchedDate) return matchedDate;
   }
 
+  const lastHtml = searchRes.text;
+  const snippets = lastHtml
+    ? [...htmlToPlainText(lastHtml).matchAll(/.{0,35}\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b.{0,35}/gi)]
+        .slice(0, 5)
+        .map(m => m[0].trim())
+    : [];
+
+  logMissedIfNeeded(showName, cutoffDate, trace, snippets);
   return "";
+}
+
+function logMissedIfNeeded(showName, cutoffDate, trace, snippets) {
+  if (!LOG_MISSED_NEXT_EPISODE || missedNextEpisodeLogs >= MAX_MISSED_LOGS) return;
+  missedNextEpisodeLogs++;
+  console.log(`[MISS #${missedNextEpisodeLogs}] "${showName}" (cutoff=${cutoffDate}) ->`, JSON.stringify(trace));
+  if (snippets && snippets.length > 0) {
+    console.log(`[MISS #${missedNextEpisodeLogs} SNIPPETS]`, snippets);
+  }
 }
 
 async function getTmdbMetadata(tmdbId, country = "US") {
