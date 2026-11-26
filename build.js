@@ -1,7 +1,7 @@
 /**
  * build.js — Stremio & Wako compatible static adult catalog
  * TMDB Daily Discover (3-Day Lookahead + 9-Day Rolling Window)
- * Sorted strictly by last_episode_to_air.air_date descending (no fallbacks).
+ * Sorted strictly by season episode air_date descending (no fallbacks, no alphabetical tie-breaker).
  */
 
 import fs from "fs";
@@ -64,7 +64,20 @@ function pacificDateString(date = new Date()) {
   return `${map.year}-${map.month}-${map.day}`;
 }
 
-async function getTmdbMetadata(tmdbId, country = "US") {
+function getSeasonEpisodeDate(seasonData, cutoffDate) {
+  const episodes = Array.isArray(seasonData?.episodes) ? seasonData.episodes : [];
+  const datedEpisodes = episodes
+    .map(ep => ep?.air_date)
+    .filter(d => typeof d === "string" && /^\d{4}-\d{2}-\d{2}$/.test(d))
+    .sort((a, b) => b.localeCompare(a));
+
+  if (datedEpisodes.length === 0) return "";
+
+  const upToCutoff = datedEpisodes.find(d => d <= cutoffDate);
+  return upToCutoff || datedEpisodes[datedEpisodes.length - 1] || "";
+}
+
+async function getTmdbMetadata(tmdbId, cutoffDate, country = "US") {
   if (!tmdbId) return null;
 
   const [details, ratingsData, externalIds, keywordsData] = await Promise.all([
@@ -76,11 +89,27 @@ async function getTmdbMetadata(tmdbId, country = "US") {
 
   if (!details) return null;
 
+  const targetSeasonNum =
+    details.last_episode_to_air?.season_number ??
+    details.next_episode_to_air?.season_number ??
+    (Array.isArray(details.seasons) && details.seasons.length > 0
+      ? details.seasons[details.seasons.length - 1]?.season_number
+      : null);
+
+  let seasonEpisodeDate = "";
+  if (typeof targetSeasonNum === "number") {
+    const seasonData = await fetchJSON(
+      `https://api.themoviedb.org/3/tv/${tmdbId}/season/${targetSeasonNum}?api_key=${TMDB_API_KEY}`
+    );
+    seasonEpisodeDate = getSeasonEpisodeDate(seasonData, cutoffDate);
+  }
+
   const ratingObj = ratingsData?.results?.find(r => r.iso_3166_1 === country) || ratingsData?.results?.[0];
   const kwList = keywordsData?.results || keywordsData?.keywords || [];
 
   return {
     details,
+    seasonEpisodeDate,
     certification: ratingObj ? ratingObj.rating : null,
     imdbId: externalIds?.imdb_id || null,
     genres: Array.isArray(details.genres) ? details.genres.map(g => g?.name).filter(Boolean) : [],
@@ -213,6 +242,7 @@ function evaluateExclusion(tmdbId, showName, tmdbMeta) {
 async function build() {
   const startedAt = Date.now();
   const discoveredShows = new Map();
+  const todayStr = pacificDateString();
 
   console.log(`Discovering English adult shows from TMDB (${LOOKAHEAD_DAYS}-day lookahead + ${RETENTION_DAYS_BACK}-day window)...`);
 
@@ -254,7 +284,7 @@ async function build() {
       console.log(`Metadata progress: ${idx + 1}/${candidates.length} (${((Date.now() - startedAt) / 1000).toFixed(1)}s)`);
     }
 
-    const tmdbMeta = await getTmdbMetadata(tmdbId);
+    const tmdbMeta = await getTmdbMetadata(tmdbId, todayStr);
     if (!tmdbMeta) return null;
 
     const showName = tmdbMeta.details.name;
@@ -268,7 +298,7 @@ async function build() {
     const imdbId = tmdbMeta.imdbId || null;
     const stremioId = `tmdb:${tmdbId}`;
     const tmdbDetails = tmdbMeta.details;
-    const episodeDate = tmdbDetails.last_episode_to_air?.air_date || "";
+    const episodeDate = tmdbMeta.seasonEpisodeDate || "";
 
     return {
       tmdbId,
