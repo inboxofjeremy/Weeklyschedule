@@ -36,9 +36,12 @@ jobs:
 
       - name: Prepare folder for Pages
         run: |
-          mkdir -p public/catalog/series
+          mkdir -p public/catalog/series public/meta/series
           cp manifest.json public/
           cp catalog/series/tvmaze_weekly_schedule.json public/catalog/series/
+          if [ -d "meta/series" ]; then
+            cp -r meta/series/. public/meta/series/
+          fi
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v4
