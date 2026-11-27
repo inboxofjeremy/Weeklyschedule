@@ -1,6 +1,6 @@
 /**
  * build.js — Static Stremio & Wako series catalog generator
- * Discovers English shows on TMDB + uses TVMaze for posters & episode air dates
+ * Discovers English shows on TMDB + uses TVMaze for posters, episode air dates & genre check
  * No meta file generation
  */
 
@@ -185,22 +185,58 @@ function evaluateExclusion(tmdbId, showName, tmdbShow) {
     return { exclude: true, reason: `Excluded: Blocked Network (${networks.join(", ")})` };
   }
 
-  const wrestlingTerms = [
-    "wwe",
-    "aew",
-    "njpw",
-    "impact wrestling",
-    "ring of honor",
-    "smackdown",
-    "wrestlemania",
-    "royal rumble",
+  const wrestlingTitlePatterns = [
+    /\bwwe\b/i,
+    /\baew\b/i,
+    /\bnjpw\b/i,
+    /\btna\b/i,
+    /\bmlw\b/i,
+    /\bncw\b/i,
+    /\bovw\b/i,
+    /\bczw\b/i,
+    /\bgcw\b/i,
+    /\bpro[- ]?wrestling\b/i,
+    /\bprofessional wrestling\b/i,
+    /\bwrestling\b/i,
+    /\bsmackdown\b/i,
+    /\bmonday night raw\b/i,
+    /\bwrestlemania\b/i,
+    /\broyal rumble\b/i,
+    /\bsummerslam\b/i,
+    /\bsurvivor series\b/i,
+    /\baew (dynamite|collision|rampage|dark)\b/i,
+    /\bwwe (nxt|raw|speed|evolve|main event|superstars|level up|lfg)\b/i,
+    /\bimpact!? wrestling\b/i,
+    /\bring of honor\b/i,
+    /\bnew japan pro\b/i,
+    /\ball elite\b/i,
+    /\bchampionship wrestling\b/i,
+    /\bworld wrestling\b/i,
+    /\bwrestler(s)?\b/i
+  ];
+  const wrestlingOverviewTerms = [
     "professional wrestling",
-    "pro wrestling"
+    "pro wrestling",
+    "pro-wrestling",
+    "wwe",
+    "all elite wrestling",
+    "aew",
+    "new japan pro-wrestling",
+    "tna wrestling",
+    "ring of honor",
+    "wrestlers",
+    "wrestling promotion",
+    "in-ring action",
+    "squared circle"
   ];
   if (
-    wrestlingTerms.some((term) => name.includes(term)) ||
+    wrestlingTitlePatterns.some((rx) => rx.test(showName)) ||
+    wrestlingOverviewTerms.some((term) => lowerOverview.includes(term)) ||
     (lowerOverview.includes("wrestling") &&
-      (lowerOverview.includes("ring") || lowerOverview.includes("championship")))
+      (lowerOverview.includes("ring") ||
+        lowerOverview.includes("championship") ||
+        lowerOverview.includes("superstars") ||
+        lowerOverview.includes("matches")))
   ) {
     return { exclude: true, reason: `Excluded: Professional Wrestling (${showName})` };
   }
@@ -268,173 +304,4 @@ function pickLatestEpisodeDate(episodes, cutoffDate) {
   const validDates = episodes
     .map((ep) => (isValidYmd(ep?.airdate) ? ep.airdate : null))
     .filter(Boolean)
-    .sort((a, b) => a.localeCompare(b));
-
-  if (validDates.length === 0) return "";
-  return [...validDates].reverse().find((d) => d <= cutoffDate) || validDates[validDates.length - 1];
-}
-
-async function getTvMazeData(showName, imdbId, cutoffDate) {
-  const show = await findTvMazeShow(showName, imdbId);
-  if (!show) {
-    return { matched: false, poster: null, airDate: "", episodeCount: 0 };
-  }
-
-  await sleep(TVMAZE_DELAY_MS);
-  const episodes = await fetchJSON(`${TVMAZE_BASE}/shows/${show.id}/episodes`);
-  const epList = Array.isArray(episodes) ? episodes : [];
-
-  const poster = show.image?.original || show.image?.medium || null;
-  const airDate = pickLatestEpisodeDate(epList, cutoffDate);
-
-  return { matched: true, poster, airDate, episodeCount: epList.length };
-}
-
-function removeMetaDirIfPresent() {
-  if (fs.existsSync(META_DIR)) {
-    fs.rmSync(META_DIR, { recursive: true, force: true });
-    console.log(`Removed legacy meta directory: ${META_DIR}`);
-  }
-}
-
-async function build() {
-  const startedAt = Date.now();
-  const discoveredIds = new Set();
-  const todayStr = pacificDateString();
-
-  console.log(`Starting catalog build for reference date (America/Los_Angeles): ${todayStr}`);
-  removeMetaDirIfPresent();
-
-  console.log(
-    `Discovering English shows from TMDB (${RETENTION_DAYS_BACK} days back to +${LOOKAHEAD_DAYS} days)...`
-  );
-  const targetDates = [];
-  for (let offset = -RETENTION_DAYS_BACK; offset <= LOOKAHEAD_DAYS; offset++) {
-    targetDates.push(addDaysYmd(todayStr, offset));
-  }
-
-  await mapWithConcurrency(targetDates, 6, async (dateStr) => {
-    let page = 1;
-    let totalPages = 1;
-    do {
-      const url = `https://api.themoviedb.org/3/discover/tv?api_key=${TMDB_API_KEY}&air_date.gte=${dateStr}&air_date.lte=${dateStr}&with_original_language=en&sort_by=popularity.desc&page=${page}`;
-      const data = await fetchJSON(url, 6000);
-      if (data?.results) {
-        totalPages = Math.min(data.total_pages || 1, 10);
-        for (const show of data.results) discoveredIds.add(show.id);
-      }
-      page++;
-    } while (page <= totalPages);
-  });
-
-  const candidates = Array.from(discoveredIds);
-  console.log(
-    `Discovered ${candidates.length} candidate shows in ${((Date.now() - startedAt) / 1000).toFixed(1)}s. Evaluating TMDB metadata...`
-  );
-
-  const filteredCandidates = [];
-  await mapWithConcurrency(candidates, 6, async (tmdbId, idx) => {
-    if ((idx + 1) % 50 === 0 || idx + 1 === candidates.length) {
-      console.log(
-        `TMDB metadata progress: ${idx + 1}/${candidates.length} (${((Date.now() - startedAt) / 1000).toFixed(1)}s)`
-      );
-    }
-    const tmdbShow = await getTmdbShow(tmdbId);
-    if (!tmdbShow) return;
-    const showName = tmdbShow.details.name;
-    const audit = evaluateExclusion(tmdbId, showName, tmdbShow);
-    if (audit.exclude) {
-      auditLogs.push({ name: showName, status: "DROPPED", airDate: "-", detail: audit.reason });
-      return;
-    }
-
-    filteredCandidates.push({
-      tmdbId,
-      showName,
-      audit,
-      imdbId: tmdbShow.imdbId || null,
-      stremioId: `tmdb:${tmdbId}`,
-      details: tmdbShow.details,
-      genres: tmdbShow.genres
-    });
-  });
-
-  console.log(`Fetching TVMaze posters & episode dates for ${filteredCandidates.length} kept shows...`);
-  let completedMaze = 0;
-  let matchedMaze = 0;
-  let withDates = 0;
-
-  const entries = await mapWithConcurrency(filteredCandidates, TVMAZE_CONCURRENCY, async (item) => {
-    const tvmaze = await getTvMazeData(item.showName, item.imdbId, todayStr);
-    if (tvmaze.matched) matchedMaze++;
-    const airDate = isValidYmd(tvmaze.airDate) ? tvmaze.airDate : "";
-    if (airDate) withDates++;
-    completedMaze++;
-
-    if (completedMaze % 25 === 0 || completedMaze === filteredCandidates.length) {
-      console.log(
-        `TVMaze progress: ${completedMaze}/${filteredCandidates.length} (matched=${matchedMaze}, withDates=${withDates}, elapsed=${((Date.now() - startedAt) / 1000).toFixed(1)}s)`
-      );
-    }
-
-    auditLogs.push({
-      name: item.showName,
-      status: "KEPT",
-      airDate: airDate || "-",
-      poster: tvmaze.poster ? "yes" : "no",
-      episodes: tvmaze.episodeCount,
-      detail: item.audit.reason
-    });
-
-    return {
-      ...item,
-      poster: tvmaze.poster,
-      airDate
-    };
-  });
-
-  entries.sort((a, b) => {
-    const aHas = isValidYmd(a.airDate);
-    const bHas = isValidYmd(b.airDate);
-    if (aHas && bHas) return b.airDate.localeCompare(a.airDate);
-    if (aHas) return -1;
-    if (bHas) return 1;
-    return a.showName.localeCompare(b.showName);
-  });
-
-  if (!fs.existsSync(CATALOG_DIR)) {
-    fs.mkdirSync(CATALOG_DIR, { recursive: true });
-  }
-
-  const metas = entries.map((item) => ({
-    id: item.stremioId,
-    imdb_id: item.imdbId || undefined,
-    tmdb_id: item.tmdbId,
-    type: "series",
-    name: item.showName,
-    genres: item.genres,
-    releaseInfo: item.airDate || undefined,
-    description: item.details.overview || "",
-    poster: item.poster,
-    background: item.details.backdrop_path
-      ? `https://image.tmdb.org/t/p/original${item.details.backdrop_path}`
-      : null
-  }));
-
-  const outFile = path.join(CATALOG_DIR, "tvmaze_weekly_schedule.json");
-  fs.writeFileSync(outFile, JSON.stringify({ metas }, null, 2));
-
-  console.log("\n=================================================================================");
-  console.log("            TVMAZE CATALOG BUILD SUMMARY                                         ");
-  console.log("=================================================================================");
-  console.table(auditLogs);
-  console.log("=================================================================================\n");
-  console.log(
-    `Wrote ${metas.length} shows to ${outFile} (TVMaze matched=${matchedMaze}, withDates=${withDates}) in ${((Date.now() - startedAt) / 1000).toFixed(1)}s.`
-  );
-}
-
-build().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+    .sort
