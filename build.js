@@ -26,6 +26,7 @@ const TVMAZE_CONCURRENCY = 4;
 const TVMAZE_DELAY_MS = 120;
 
 const jsonCache = new Map();
+const auditLogs = [];
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const isValidYmd = (s) => typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s);
@@ -147,18 +148,25 @@ function evaluateExclusion(tmdbId, showName, tmdbShow) {
     whitelistedIds.includes(Number(tmdbId)) ||
     whitelistedTitles.some((t) => name === t || name.includes(t))
   ) {
-    return false;
+    return { exclude: false, reason: "Whitelisted Override" };
   }
   if (tmdbShow.voteCount === 0 || (tmdbShow.voteAverage !== null && tmdbShow.voteAverage < 0.5)) {
-    return true;
+    return {
+      exclude: true,
+      reason: `Excluded: Unrated or rating below 5% (Votes: ${tmdbShow.voteCount})`
+    };
   }
   const genres = (tmdbShow.genres || []).map((g) => String(g || "").toLowerCase());
   const lang = (tmdbShow.originalLanguage || "").toLowerCase();
   const networks = (tmdbShow.networks || []).map((n) => String(n || "").toLowerCase());
   const lowerOverview = (tmdbShow.details.overview || "").toLowerCase();
 
-  if (lang !== "en") return true;
-  if (/[\u4e00-\u9fa5\u3040-\u30ff\u3130-\u318f\u0400-\u04ff]/.test(showName)) return true;
+  if (lang !== "en") {
+    return { exclude: true, reason: `Excluded: Non-English language ('${lang}')` };
+  }
+  if (/[\u4e00-\u9fa5\u3040-\u30ff\u3130-\u318f\u0400-\u04ff]/.test(showName)) {
+    return { exclude: true, reason: `Excluded: Contains foreign script (${showName})` };
+  }
 
   const blockedNetworks = [
     "iqiyi",
@@ -173,7 +181,9 @@ function evaluateExclusion(tmdbId, showName, tmdbShow) {
     "geo entertainment",
     "tokyo mx"
   ];
-  if (networks.some((net) => blockedNetworks.some((b) => net.includes(b)))) return true;
+  if (networks.some((net) => blockedNetworks.some((b) => net.includes(b)))) {
+    return { exclude: true, reason: `Excluded: Blocked Network (${networks.join(", ")})` };
+  }
 
   const wrestlingTerms = [
     "wwe",
@@ -192,7 +202,7 @@ function evaluateExclusion(tmdbId, showName, tmdbShow) {
     (lowerOverview.includes("wrestling") &&
       (lowerOverview.includes("ring") || lowerOverview.includes("championship")))
   ) {
-    return true;
+    return { exclude: true, reason: `Excluded: Professional Wrestling (${showName})` };
   }
 
   if (
@@ -203,7 +213,7 @@ function evaluateExclusion(tmdbId, showName, tmdbShow) {
     lowerOverview.includes("short drama") ||
     (name.includes("devil") && lowerOverview.includes("billionaire"))
   ) {
-    return true;
+    return { exclude: true, reason: "Excluded: Vertical short-drama / micro-series pattern" };
   }
 
   const allowedGenres = [
@@ -220,13 +230,17 @@ function evaluateExclusion(tmdbId, showName, tmdbShow) {
     name.includes("zombie") ||
     name.includes("beach")
   ) {
-    return false;
+    return { exclude: false, reason: "Allowed Reality/Renovation Content" };
   }
 
-  if (genres.some((g) => g.includes("sports"))) return true;
-  if (genres.some((g) => g.includes("news") || g.includes("talk"))) return true;
-  if (genres.some((g) => g === "documentary")) return true;
-  return false;
+  if (genres.some((g) => g.includes("sports"))) return { exclude: true, reason: "Excluded: Sports" };
+  if (genres.some((g) => g.includes("news") || g.includes("talk"))) {
+    return { exclude: true, reason: "Excluded: News/Talk" };
+  }
+  if (genres.some((g) => g === "documentary")) {
+    return { exclude: true, reason: "Excluded: Pure Documentary" };
+  }
+  return { exclude: false, reason: "Passed general rules" };
 }
 
 async function findTvMazeShow(showName, imdbId) {
@@ -263,26 +277,23 @@ function pickLatestEpisodeDate(episodes, cutoffDate) {
 async function getTvMazeData(showName, imdbId, cutoffDate) {
   const show = await findTvMazeShow(showName, imdbId);
   if (!show) {
-    return { poster: null, airDate: "", episodes: [] };
+    return { matched: false, poster: null, airDate: "", episodeCount: 0 };
   }
 
   await sleep(TVMAZE_DELAY_MS);
   const episodes = await fetchJSON(`${TVMAZE_BASE}/shows/${show.id}/episodes`);
   const epList = Array.isArray(episodes) ? episodes : [];
 
-  const poster =
-    show.image?.original ||
-    show.image?.medium ||
-    null;
-
+  const poster = show.image?.original || show.image?.medium || null;
   const airDate = pickLatestEpisodeDate(epList, cutoffDate);
 
-  return { poster, airDate, episodes: epList };
+  return { matched: true, poster, airDate, episodeCount: epList.length };
 }
 
 function removeMetaDirIfPresent() {
   if (fs.existsSync(META_DIR)) {
     fs.rmSync(META_DIR, { recursive: true, force: true });
+    console.log(`Removed legacy meta directory: ${META_DIR}`);
   }
 }
 
@@ -291,8 +302,12 @@ async function build() {
   const discoveredIds = new Set();
   const todayStr = pacificDateString();
 
+  console.log(`Starting catalog build for reference date (America/Los_Angeles): ${todayStr}`);
   removeMetaDirIfPresent();
 
+  console.log(
+    `Discovering English shows from TMDB (${RETENTION_DAYS_BACK} days back to +${LOOKAHEAD_DAYS} days)...`
+  );
   const targetDates = [];
   for (let offset = -RETENTION_DAYS_BACK; offset <= LOOKAHEAD_DAYS; offset++) {
     targetDates.push(addDaysYmd(todayStr, offset));
@@ -313,18 +328,30 @@ async function build() {
   });
 
   const candidates = Array.from(discoveredIds);
-  console.log(`Discovered ${candidates.length} candidate shows.`);
+  console.log(
+    `Discovered ${candidates.length} candidate shows in ${((Date.now() - startedAt) / 1000).toFixed(1)}s. Evaluating TMDB metadata...`
+  );
 
   const filteredCandidates = [];
-  await mapWithConcurrency(candidates, 6, async (tmdbId) => {
+  await mapWithConcurrency(candidates, 6, async (tmdbId, idx) => {
+    if ((idx + 1) % 50 === 0 || idx + 1 === candidates.length) {
+      console.log(
+        `TMDB metadata progress: ${idx + 1}/${candidates.length} (${((Date.now() - startedAt) / 1000).toFixed(1)}s)`
+      );
+    }
     const tmdbShow = await getTmdbShow(tmdbId);
     if (!tmdbShow) return;
     const showName = tmdbShow.details.name;
-    if (evaluateExclusion(tmdbId, showName, tmdbShow)) return;
+    const audit = evaluateExclusion(tmdbId, showName, tmdbShow);
+    if (audit.exclude) {
+      auditLogs.push({ name: showName, status: "DROPPED", airDate: "-", detail: audit.reason });
+      return;
+    }
 
     filteredCandidates.push({
       tmdbId,
       showName,
+      audit,
       imdbId: tmdbShow.imdbId || null,
       stremioId: `tmdb:${tmdbId}`,
       details: tmdbShow.details,
@@ -332,9 +359,33 @@ async function build() {
     });
   });
 
+  console.log(`Fetching TVMaze posters & episode dates for ${filteredCandidates.length} kept shows...`);
+  let completedMaze = 0;
+  let matchedMaze = 0;
+  let withDates = 0;
+
   const entries = await mapWithConcurrency(filteredCandidates, TVMAZE_CONCURRENCY, async (item) => {
     const tvmaze = await getTvMazeData(item.showName, item.imdbId, todayStr);
+    if (tvmaze.matched) matchedMaze++;
     const airDate = isValidYmd(tvmaze.airDate) ? tvmaze.airDate : "";
+    if (airDate) withDates++;
+    completedMaze++;
+
+    if (completedMaze % 25 === 0 || completedMaze === filteredCandidates.length) {
+      console.log(
+        `TVMaze progress: ${completedMaze}/${filteredCandidates.length} (matched=${matchedMaze}, withDates=${withDates}, elapsed=${((Date.now() - startedAt) / 1000).toFixed(1)}s)`
+      );
+    }
+
+    auditLogs.push({
+      name: item.showName,
+      status: "KEPT",
+      airDate: airDate || "-",
+      poster: tvmaze.poster ? "yes" : "no",
+      episodes: tvmaze.episodeCount,
+      detail: item.audit.reason
+    });
+
     return {
       ...item,
       poster: tvmaze.poster,
@@ -370,13 +421,16 @@ async function build() {
       : null
   }));
 
-  fs.writeFileSync(
-    path.join(CATALOG_DIR, "tvmaze_weekly_schedule.json"),
-    JSON.stringify({ metas }, null, 2)
-  );
+  const outFile = path.join(CATALOG_DIR, "tvmaze_weekly_schedule.json");
+  fs.writeFileSync(outFile, JSON.stringify({ metas }, null, 2));
 
+  console.log("\n=================================================================================");
+  console.log("            TVMAZE CATALOG BUILD SUMMARY                                         ");
+  console.log("=================================================================================");
+  console.table(auditLogs);
+  console.log("=================================================================================\n");
   console.log(
-    `Done: ${metas.length} catalog entries written in ${((Date.now() - startedAt) / 1000).toFixed(1)}s.`
+    `Wrote ${metas.length} shows to ${outFile} (TVMaze matched=${matchedMaze}, withDates=${withDates}) in ${((Date.now() - startedAt) / 1000).toFixed(1)}s.`
   );
 }
 
